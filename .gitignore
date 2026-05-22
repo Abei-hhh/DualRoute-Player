@@ -1,0 +1,75 @@
+# Built application files
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Java/Kotlin compiled
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+release/
+
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Kotlin build cache (K2)
+.kotlin/
+
+# Native build
+.externalNativeBuild/
+.cxx/
+
+# Local configuration (sdk path, signing config, etc.)
+local.properties
+
+# IDE: IntelliJ / Android Studio
+*.iml
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.idea/deploymentTargetDropDown.xml
+.idea/deploymentTargetSelector.xml
+.idea/misc.xml
+.idea/jarRepositories.xml
+.idea/compiler.xml
+.idea/gradle.xml
+.idea/runConfigurations.xml
+.idea/dictionaries/
+.idea/shelf/
+.idea/.name
+
+# Captures
+/captures
+
+# Profiling
+*.hprof
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Keystore secrets (do NOT commit signing keys)
+*.jks
+*.keystore
+keystore.properties
+
+# Claude Code local config (user-specific permissions, hooks)
+.claude/settings.local.json
+.claude/cache/
+.claude/logs/
+
+# Plan / scratch files
+.claude/plans/
+

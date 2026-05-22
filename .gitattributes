@@ -1,0 +1,39 @@
+# Normalize line endings — text files use LF in the repo, native EOL in working tree on checkout.
+* text=auto eol=lf
+
+# Source files
+*.kt        text eol=lf diff=kotlin
+*.kts       text eol=lf
+*.java      text eol=lf diff=java
+*.xml       text eol=lf
+*.toml      text eol=lf
+*.properties text eol=lf
+*.md        text eol=lf
+*.cpp       text eol=lf diff=cpp
+*.c         text eol=lf diff=cpp
+*.h         text eol=lf diff=cpp
+
+# Windows-only batch files keep CRLF
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Shell scripts must stay LF or they break on POSIX
+*.sh        text eol=lf
+gradlew     text eol=lf
+
+# Binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.webp      binary
+*.ico       binary
+*.jar       binary
+*.aar       binary
+*.so        binary
+*.keystore  binary
+*.jks       binary
+*.mp4       binary
+*.mkv       binary
+*.mp3       binary
+*.flac      binary
