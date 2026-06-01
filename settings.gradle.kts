@@ -19,6 +19,9 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // IjkPlayer 接入时再打开下面之一(maven.bilibili.com 现已不稳定):
+        // maven { url = uri("https://maven.bilibili.com/") }
+        // maven { url = uri("https://jitpack.io") }
     }
 }
 
@@ -26,3 +29,4 @@ rootProject.name = "test"
 include(":app")
 include(":core")
 include(":media")
+include(":player-ui")

@@ -20,13 +20,26 @@ lifecycle = "2.8.7"
 coroutines = "1.10.1"
 
 # Media3
-media3 = "1.5.1"
+media3 = "1.6.0"
 
 # DataStore
 datastore = "1.1.1"
 
 # Navigation
 navigationCompose = "2.8.5"
+
+# Coil
+coil = "2.7.0"
+
+# IjkPlayer:k0.8.8 是最后一个上游 release。maven.bilibili.com 这两年访问极不稳定/部分
+# artifact 已下线,新接入时建议:
+#   1) 从 https://github.com/bilibili/ijkplayer release 拉对应 aar 放到 :media/libs/
+#   2) 或使用社区维护的 jitpack mirror,把 settings.gradle.kts 里换成
+#      `maven { url = uri("https://jitpack.io") }` 并改 groupId
+ijkplayer = "0.8.8"
+
+# CameraX —— 录制功能用
+cameraX = "1.4.1"
 
 [libraries]
 # Core AndroidX
@@ -42,6 +55,7 @@ androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graph
 androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
 
@@ -59,9 +73,31 @@ androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplaye
 androidx-media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }
 androidx-media3-ui-compose = { group = "androidx.media3", name = "media3-ui-compose", version.ref = "media3" }
 androidx-media3-common = { group = "androidx.media3", name = "media3-common", version.ref = "media3" }
+# datasource + database 用于 progressive HTTP 流播的边下边播缓存
+# (SimpleCache + CacheDataSource + StandaloneDatabaseProvider)
+androidx-media3-datasource = { group = "androidx.media3", name = "media3-datasource", version.ref = "media3" }
+androidx-media3-database = { group = "androidx.media3", name = "media3-database", version.ref = "media3" }
 
 # DataStore
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+
+# Coil
+coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
+coil-video = { group = "io.coil-kt", name = "coil-video", version.ref = "coil" }
+
+# IjkPlayer artifact 坐标(maven.bilibili.com 上 0.8.8 部分已下线,接入时改成本地 files
+# 或换成可用的 jitpack mirror 即可)。alias 留在这里是给将来 implementation(libs.ijkplayer.*) 用,
+# 现在 :media 的 build.gradle.kts 已经把对应 implementation 行注释掉了。
+# ijkplayer-java = { group = "tv.danmaku.ijk.media", name = "ijkplayer-java", version.ref = "ijkplayer" }
+# ijkplayer-arm64 = { group = "tv.danmaku.ijk.media", name = "ijkplayer-arm64", version.ref = "ijkplayer" }
+# ijkplayer-armv7a = { group = "tv.danmaku.ijk.media", name = "ijkplayer-armv7a", version.ref = "ijkplayer" }
+
+# CameraX:录像走 video + view (PreviewView) + lifecycle (绑定 Activity 生命周期)
+androidx-camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "cameraX" }
+androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraX" }
+androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraX" }
+androidx-camera-video = { group = "androidx.camera", name = "camera-video", version.ref = "cameraX" }
+androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraX" }
 
 # Testing
 junit = { group = "junit", name = "junit", version.ref = "junit" }
