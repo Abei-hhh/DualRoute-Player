@@ -25,7 +25,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "test"
+rootProject.name = "SplitPlay"
 include(":app")
 include(":core")
 include(":media")

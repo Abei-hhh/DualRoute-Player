@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.abei.test.playerui"
+    namespace = "com.abei.splitplay.playerui"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1

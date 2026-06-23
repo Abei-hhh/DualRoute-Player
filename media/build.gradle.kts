@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.abei.test.media"
+    namespace = "com.abei.splitplay.media"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1

@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.abei.test.core"
+    namespace = "com.abei.splitplay.core"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1

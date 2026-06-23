@@ -1,0 +1,317 @@
+package com.abei.splitplay.playerui
+
+import android.content.ContentResolver
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.widget.Toast
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import com.abei.splitplay.core.EnginePrefs
+import com.abei.splitplay.media.PlayerEngineRegistry
+import com.abei.splitplay.media.PlayerEngineType
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import java.util.Locale
+
+/**
+ * 播放速度精细调整(0.25x..4x,步进 0.25)+ 视频信息卡片。
+ * 内嵌在详情页 [PlayerScreen] 里,不再是单独的导航目的地 —— 避免 SurfaceView
+ * 在 push/pop 过渡时反复 attach/detach 造成的画面闪/黑。
+ */
+
+@Composable
+internal fun SpeedSection(speed: Float, onSpeedChange: (Float) -> Unit) {
+    // sliderValue 本地驱动,松手才 commit 给 engine,避免拖动时狂改 PlaybackParameters。
+    var sliderValue by remember { mutableStateOf(speed) }
+    LaunchedEffect(speed) { sliderValue = speed }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            // 标题 + 当前值合在一行,节省竖向空间;
+            // CompactSlider 跟详情页进度条同款 14dp 圆 thumb + 4dp 细 track,看起来一致。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("播放速度", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    String.format(Locale.US, "%.2fx", sliderValue),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+            // 0.25..4.0,步进 0.25。Slider.steps 是端点间的内部刻度,(4-0.25)/0.25 = 15 段。
+            CompactSlider(
+                value = (sliderValue - 0.25f) / (4f - 0.25f),
+                onValueChange = { fraction -> sliderValue = 0.25f + fraction * (4f - 0.25f) },
+                onValueChangeFinished = { onSpeedChange(sliderValue) },
+                steps = 14,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("0.25x", style = MaterialTheme.typography.labelSmall)
+                Text("1x", style = MaterialTheme.typography.labelSmall)
+                Text("2x", style = MaterialTheme.typography.labelSmall)
+                Text("4x", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+@Composable
+internal fun VideoInfoSection(state: PlayerUiState) {
+    val context = LocalContext.current
+    val uri = state.mediaUri
+    val fileInfo = remember(uri) {
+        if (uri == null) FileInfo(null, null) else queryFileInfo(context.contentResolver, uri)
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("视频信息", style = MaterialTheme.typography.titleMedium)
+            InfoRow("文件名", fileInfo.displayName ?: uri?.lastPathSegment ?: "—")
+            InfoRow("协议", uri?.scheme ?: "—")
+            InfoRow("时长", formatTime(state.playback.durationMs))
+            InfoRow("当前位置", formatTime(state.playback.positionMs))
+            val res = if (state.playback.videoWidth > 0 && state.playback.videoHeight > 0) {
+                "${state.playback.videoWidth} × ${state.playback.videoHeight}"
+            } else "—"
+            InfoRow("分辨率", res)
+            InfoRow(
+                "文件大小",
+                fileInfo.sizeBytes?.let { formatBytes(it) } ?: "—",
+            )
+            InfoRow("播放速度", String.format(Locale.US, "%.2fx", state.playback.playbackSpeed))
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Text(
+                "URI",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(uri?.toString() ?: "—", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+private data class FileInfo(val displayName: String?, val sizeBytes: Long?)
+
+/** SAF / MediaStore 的 content:// URI 用 OpenableColumns 拿到原始文件名和大小。 */
+private fun queryFileInfo(resolver: ContentResolver, uri: Uri): FileInfo {
+    if (uri.scheme != "content") return FileInfo(null, null)
+    return runCatching {
+        resolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+            null, null, null,
+        )?.use { cursor ->
+            if (!cursor.moveToFirst()) return@use FileInfo(null, null)
+            val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+            FileInfo(
+                displayName = if (nameIdx >= 0) cursor.getString(nameIdx) else null,
+                sizeBytes = if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) cursor.getLong(sizeIdx) else null,
+            )
+        } ?: FileInfo(null, null)
+    }.getOrElse { FileInfo(null, null) }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB", "TB")
+    var value = bytes.toDouble()
+    var i = 0
+    while (value >= 1024 && i < units.size - 1) {
+        value /= 1024
+        i++
+    }
+    return String.format(Locale.US, "%.2f %s", value, units[i])
+}
+
+/**
+ * 播放器引擎选择 + 服务器地址(流播预留)。
+ * 引擎切换需要重建 [com.abei.splitplay.media.PlayerEngine] 实例,改 pref 即生效,
+ * 不会立刻在当前会话里换内核 —— 这里直接 Toast 提示"下次进入生效"。
+ */
+@Composable
+internal fun EngineSection(prefs: EnginePrefs) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // 初次进入时从 DataStore 拉一次当前值;后续用户操作直接更新本地状态 + 持久化。
+    var selected by remember { mutableStateOf(PlayerEngineType.EXOPLAYER) }
+    var serverUrl by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        prefs.engineType.first()
+            ?.let { runCatching { PlayerEngineType.valueOf(it) }.getOrNull() }
+            ?.let { selected = it }
+        serverUrl = prefs.serverBaseUrl.first()
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("播放器引擎", style = MaterialTheme.typography.titleSmall)
+            PlayerEngineRegistry.all().forEach { type ->
+                EngineOption(
+                    type = type,
+                    selected = selected == type,
+                    onClick = {
+                        if (selected == type) return@EngineOption
+                        selected = type
+                        scope.launch { prefs.setEngineType(type.name) }
+                        val msg = if (type == PlayerEngineType.CUSTOM) {
+                            "${type.displayName} 尚未实现,下次进入播放页时会兜底用 ExoPlayer"
+                        } else {
+                            "已切换为 ${type.displayName},下次播放生效"
+                        }
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    },
+                )
+            }
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            Text("服务器地址", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "流播预留:http(s) 视频前缀,后续做远端目录浏览/历史时拼接用。本地视频不影响。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = serverUrl,
+                onValueChange = {
+                    serverUrl = it
+                    scope.launch { prefs.setServerBaseUrl(it) }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = { Text("https://example.com/videos/") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            )
+        }
+    }
+}
+
+@Composable
+private fun EngineOption(
+    type: PlayerEngineType,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Box(modifier = Modifier.padding(start = 8.dp)) {
+            Column {
+                Text(type.displayName, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    type.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 复用的播放器/服务器设置弹窗。首页和详情页都通过它打开,内容就是 [EngineSection]。
+ * 走 AlertDialog 是因为这玩意需求是"随时可调"——比 push 到独立 screen 体验顺。
+ */
+@Composable
+fun SettingsDialog(
+    open: Boolean,
+    prefs: EnginePrefs,
+    onDismiss: () -> Unit,
+) {
+    if (!open) return
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("完成") }
+        },
+        title = { Text("播放器设置") },
+        text = {
+            // 引擎 + 服务器地址内嵌在 EngineSection 里;弹窗本身按内容自适应高度,
+            // 屏幕小的时候 dialog 自带 scroll 还不够稳,这里再外包一层 verticalScroll。
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                EngineSection(prefs = prefs)
+            }
+        },
+    )
+}
+
+/**
+ * 给 :app 调用的便利入口:不需要 ViewModel 也能弹设置(首页用),
+ * 自己从 LocalContext 构造 [EnginePrefs] 实例。
+ */
+@Composable
+fun rememberEnginePrefs(): EnginePrefs {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    return androidx.compose.runtime.remember(ctx) { EnginePrefs(ctx) }
+}
