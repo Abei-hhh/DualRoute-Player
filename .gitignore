@@ -73,3 +73,10 @@ keystore.properties
 # Plan / scratch files
 .claude/plans/
 
+# Internal docs — kept local, not published
+/CLAUDE.md
+/docs/
+/siri.md
+/my_video_study.md
+/my_video_study2.md
+/音视频完整流程.md
