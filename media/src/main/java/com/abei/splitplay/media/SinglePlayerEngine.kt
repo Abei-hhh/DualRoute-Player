@@ -16,6 +16,8 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import com.abei.splitplay.media.ffmpeg.FfmpegRenderersFactory
+import com.abei.splitplay.nativelib.FfmpegNative
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -48,20 +50,27 @@ class SinglePlayerEngine(
     private val exo: ExoPlayer = ExoPlayer.Builder(context.applicationContext)
         .setMediaSourceFactory(MediaCache.mediaSourceFactory(context.applicationContext))
         .apply {
+            // DecoderPolicy:决定 RenderersFactory 选哪个。
+            //  - AUTO       —— 默认硬解优先,软解可作 fallback(Media3 内部链)
+            //  - FORCE_HW   —— 当前等同 AUTO(只硬不软需要再 patch DefaultRenderersFactory
+            //                  把 extension renderer 拒之门外,此处暂不做)
+            //  - FORCE_SW   —— audio 路径用 FfmpegRenderersFactory(优先 FFmpeg 软解);
+            //                  video 端仍走默认(M5c 未做 video renderer,FORCE_SW 视频等同 AUTO)
+            val useFfmpegFactory = decoderPolicy == DecoderPolicy.FORCE_SW && FfmpegNative.hasFfmpeg
             when (channel) {
-                PlayerChannel.AUDIO_ONLY ->
-                    setRenderersFactory(AudioOnlyRenderersFactory(context.applicationContext))
-                PlayerChannel.VIDEO_ONLY ->
-                    setRenderersFactory(VideoOnlyRenderersFactory(context.applicationContext))
-                PlayerChannel.BOTH -> Unit
+                PlayerChannel.AUDIO_ONLY -> setRenderersFactory(
+                    AudioOnlyRenderersFactory(context.applicationContext)
+                )
+                PlayerChannel.VIDEO_ONLY -> setRenderersFactory(
+                    VideoOnlyRenderersFactory(context.applicationContext)
+                )
+                PlayerChannel.BOTH -> {
+                    if (useFfmpegFactory) {
+                        setRenderersFactory(FfmpegRenderersFactory(context.applicationContext))
+                    }
+                    // 否则保持默认 DefaultRenderersFactory(ExoPlayer.Builder 默认)
+                }
             }
-            // DecoderPolicy 接入位:
-            //  AUTO     —— 默认 RenderersFactory 已经硬解优先,什么都不动
-            //  FORCE_HW —— 当前等同 AUTO(默认 factory 没有装额外软解 extension);
-            //              :native 接入 FFmpeg 后才需要这里"只硬不软"过滤
-            //  FORCE_SW —— TODO M5b :native 上线后:把 RenderersFactory 换成 FfmpegRenderersFactory,
-            //              video 端用 FfmpegVideoRenderer,audio 端用 FfmpegAudioRenderer。
-            //              当前先吞下参数,行为等同 AUTO,UI 给的提示已经说"软解未启用"。
         }
         .build()
         .also { player ->

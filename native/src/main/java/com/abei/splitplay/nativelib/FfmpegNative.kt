@@ -43,6 +43,46 @@ object FfmpegNative {
         return runCatching { nativeListDecoders().toList() }.getOrElse { emptyList() }
     }
 
+    // ---- Audio decode ----
+
+    /**
+     * 打开一个 audio decoder。
+     *  - [mime] 跟 Android `Format.sampleMimeType` 一致("audio/mp4a-latm" 等)
+     *  - [extraData] = Android Format.initializationData[0](AAC CSD-0、Vorbis ID header 等)
+     *  - 返回的 handle 给后续 decode/release;`0` 表示初始化失败,调用方需要 fallback。
+     */
+    @JvmStatic
+    external fun nativeAudioOpen(
+        mime: String,
+        extraData: ByteArray?,
+        sampleRate: Int,
+        channels: Int,
+    ): Long
+
+    /**
+     * 喂一个 packet 进解码器,把所有产生的 PCM frames 写到 [outputDirect],返回 byte 数。
+     * 负数表示错误(`-5` 输出 buffer 不够,调用方应加大;其它见 audio_decoder.cpp)。
+     * [outputDirect] 必须是 DirectByteBuffer。
+     */
+    @JvmStatic
+    external fun nativeAudioDecode(
+        handle: Long,
+        inputDirect: java.nio.ByteBuffer,
+        inputSize: Int,
+        outputDirect: java.nio.ByteBuffer,
+        outputCapacity: Int,
+    ): Int
+
+    /** Seek 等场景调用,清空 decoder 内部 buffer。 */
+    @JvmStatic
+    external fun nativeAudioReset(handle: Long)
+
+    /** 释放 decoder context。release 后 handle 不能再用。 */
+    @JvmStatic
+    external fun nativeAudioRelease(handle: Long)
+
+    // ---- meta / introspection ----
+
     @JvmStatic
     private external fun nativeHasFfmpeg(): Boolean
     @JvmStatic

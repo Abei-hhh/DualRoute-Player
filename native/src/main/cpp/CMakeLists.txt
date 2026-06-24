@@ -30,6 +30,7 @@ endif()
 add_library(ffmpegwrapper SHARED
     capability.cpp
     ffmpeg_jni.cpp
+    audio_decoder.cpp
 )
 
 target_include_directories(ffmpegwrapper PRIVATE
