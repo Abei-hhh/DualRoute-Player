@@ -159,7 +159,12 @@ fun PlayerScreen(
     }
 
     var settingsOpen by remember { mutableStateOf(false) }
-    SettingsDialog(open = settingsOpen, prefs = viewModel.enginePrefs, onDismiss = { settingsOpen = false })
+    SettingsDialog(
+        open = settingsOpen,
+        prefs = viewModel.enginePrefs,
+        onDismiss = { settingsOpen = false },
+        viewModel = viewModel,
+    )
 
     if (state.isFullscreen) {
         FullscreenPlayer(state, viewModel)
@@ -199,6 +204,9 @@ fun PlayerScreen(
                 )
                 if (state.mediaUri != null) {
                     Controls(state, viewModel)
+                    if (state.playbackMode == PlaybackMode.SPLIT) {
+                        SplitChannelBars(viewModel)
+                    }
                     SpeedSection(state.playback.playbackSpeed, viewModel::setSpeed)
                     VideoInfoSection(state)
                     Spacer(Modifier.height(8.dp))
@@ -245,6 +253,7 @@ private fun VideoSurface(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val sink by viewModel.videoSink.collectAsStateWithLifecycle()
     // 详情页强制 FIT_AUTO(用户没机会改);全屏走 ViewModel 里的当前选择。
     val effectiveMode = if (isFullscreen) state.fitMode else VideoFitMode.FIT_AUTO
     Box(
@@ -253,10 +262,21 @@ private fun VideoSurface(
             .background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
+        // 外屏模式下本地 SurfaceView 仍然存在 —— 但它给 engine 喂的 surface 会被
+        // VM 按 sink 守卫扣下,本地框是黑底空播,正是预期。
         EngineSurface(
-            engine = viewModel.engine,
+            viewModel = viewModel,
             modifier = fitModifier(effectiveMode, state.playback.videoWidth, state.playback.videoHeight),
         )
+        // sink 从 External 切回 Local 时,本地 SurfaceView 可能没经历销毁/重建
+        //(Compose 不会重新构建 AndroidView)所以 surfaceCreated 不会再触发。
+        // 这里手动在 sink 变化时回调一次 VM 让它走 bindLocalSurface 路径 —— VM 内部
+        // 拿不到 Surface 实例,所以这里实际由 EngineSurface 内部的 SurfaceHolder.Callback
+        // 处理:见 EngineSurface 上的 sink 监听。但是 SurfaceHolder.Callback 已经早就
+        // 注册了,只能用一个外部触发器。简化做法:外屏切回主屏时让 EngineSurface 重组
+        // 即可,这里通过给 Modifier 加一个 sink 派生 key 实现(其实就是 fillMaxSize 不变,
+        // 改这个 modifier 不会 attach 新 view)。
+        // → 真正的方案在 EngineSurface 内部用 DisposableEffect(sink) 触发 rebind。
         if (!isFullscreen) {
             IconButton(
                 onClick = viewModel::toggleFullscreen,
@@ -271,23 +291,44 @@ private fun VideoSurface(
                 )
             }
         }
+        // 外屏模式下叠加一个提示,告诉用户画面去了哪里。
+        if (sink is PlayerViewModel.VideoSink.External) {
+            val selected by viewModel.selectedDisplay.collectAsStateWithLifecycle()
+            Text(
+                "画面已投到 ${selected?.name ?: "外接屏"}",
+                color = Color.White,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
     }
 }
 
 /**
- * 引擎无关的视频输出层。内部包一个 [SurfaceView],surface 创建/销毁时把 [Surface] 喂给
- * 引擎。这样 ExoPlayer / IjkPlayer / 自实现内核 都套同一个 Composable,不再依赖
- * Media3 的 `PlayerSurface(player)` ——后者要 Media3 Player 实例,IjkPlayer 满足不了。
+ * 引擎无关的视频输出层。内部包一个 [SurfaceView],surface 创建/销毁时通过
+ * [PlayerViewModel.bindLocalSurface] 喂给引擎 —— 该方法内部会按 `videoSink` 守卫:
+ * 只有当画面应该留在本地时才真的 `engine.setVideoSurface(...)`,否则不动,
+ * 让外接屏 Presentation 那条链独占 surface。
+ *
+ * 处理 sink 切换:外屏切回主屏时本地 SurfaceView 没经历销毁/重建([SurfaceHolder.Callback]
+ * 不会再触发),需要手动重绑。这里用 [LaunchedEffect] 监听 `videoSink`,变化时取当前
+ * holder.surface 再调一次 [PlayerViewModel.bindLocalSurface]。
+ *
+ * 这样 ExoPlayer / IjkPlayer / 自实现内核 都套同一个 Composable,不再依赖 Media3 的
+ * `PlayerSurface(player)`——后者要 Media3 Player 实例,IjkPlayer 满足不了。
  */
 @Composable
-private fun EngineSurface(engine: PlayerEngine, modifier: Modifier = Modifier) {
+private fun EngineSurface(viewModel: PlayerViewModel, modifier: Modifier = Modifier) {
+    val sink by viewModel.videoSink.collectAsStateWithLifecycle()
+    val engine by viewModel.engineFlow.collectAsStateWithLifecycle()
+    // SurfaceView 引用在 factory 里赋值,LaunchedEffect 里用作主屏重绑入口。
+    val surfaceViewRef = remember { mutableStateOf<SurfaceView?>(null) }
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
             SurfaceView(ctx).apply {
                 holder.addCallback(object : SurfaceHolder.Callback {
                     override fun surfaceCreated(holder: SurfaceHolder) {
-                        engine.setVideoSurface(holder.surface)
+                        viewModel.bindLocalSurface(holder.surface)
                     }
                     override fun surfaceChanged(
                         holder: SurfaceHolder,
@@ -300,12 +341,26 @@ private fun EngineSurface(engine: PlayerEngine, modifier: Modifier = Modifier) {
                     override fun surfaceDestroyed(holder: SurfaceHolder) {
                         // 必须传 null 让引擎释放对这个 Surface 的引用,否则
                         // detach 后 native 还往一块已销毁的内存里 blit。
-                        engine.setVideoSurface(null)
+                        // ViewModel 会按 sink 守卫;外屏模式下这个 null 不会传给 engine。
+                        viewModel.bindLocalSurface(null)
                     }
                 })
+                surfaceViewRef.value = this
             }
         },
     )
+    // sink 切换 / 模式切换都需要主动重绑:
+    //  - 切回主屏:本地 SurfaceView 仍在,holder.surface 也活着,但 engine 端已被 selectDisplay
+    //    解绑过(setVideoSurface(null))
+    //  - 切换播放模式:engine 实例被换掉,新 engine 默认 Surface = null,需要喂一次
+    LaunchedEffect(sink, engine) {
+        if (sink is PlayerViewModel.VideoSink.Local) {
+            val s = surfaceViewRef.value?.holder?.surface
+            if (s != null && s.isValid) {
+                viewModel.bindLocalSurface(s)
+            }
+        }
+    }
 }
 
 @Composable
@@ -494,7 +549,7 @@ private fun FullscreenPlayer(state: PlayerUiState, viewModel: PlayerViewModel) {
             contentAlignment = Alignment.Center,
         ) {
             EngineSurface(
-                engine = viewModel.engine,
+                viewModel = viewModel,
                 // 全屏:用 state.fitMode + 视频原始宽高决定 surface 实际尺寸。
                 // 非 STRETCH 时 surface 比容器小,外面 Box(contentAlignment=Center) 把它居中,
                 // 上下/左右自然就成了黑边,不会再被强行拉伸。
@@ -671,6 +726,61 @@ private fun Controls(state: PlayerUiState, viewModel: PlayerViewModel) {
                 style = MaterialTheme.typography.bodySmall,
             )
         }
+    }
+}
+
+/**
+ * SPLIT 模式下详情页的额外两条控制条 —— 音频通道、视频通道独立 pause/resume。
+ * 主控件 [Controls] 仍然在,但走的是整机操作(广播给两个子引擎),这两条只发命令到
+ * 一侧。视频条暂停 → 画面冻结但声音继续(场景 A 的"静音 MV");音频条暂停 → 声音停
+ * 但画面继续。
+ *
+ * 子引擎 state 用 collectAsStateWithLifecycle 单独订阅,UI 只 reflect 自己那一通道。
+ */
+@Composable
+private fun SplitChannelBars(viewModel: PlayerViewModel) {
+    val audio by viewModel.audioSubEngine.collectAsStateWithLifecycle()
+    val video by viewModel.videoSubEngine.collectAsStateWithLifecycle()
+    if (audio == null || video == null) return
+    val audioState by audio!!.state.collectAsStateWithLifecycle()
+    val videoState by video!!.state.collectAsStateWithLifecycle()
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        ChannelControlBar(
+            label = "音频",
+            isPlaying = audioState.isPlaying,
+            onToggle = viewModel::togglePlayPauseAudio,
+        )
+        ChannelControlBar(
+            label = "视频",
+            isPlaying = videoState.isPlaying,
+            onToggle = viewModel::togglePlayPauseVideo,
+        )
+    }
+}
+
+@Composable
+private fun ChannelControlBar(
+    label: String,
+    isPlaying: Boolean,
+    onToggle: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        IconButton(onClick = onToggle) {
+            Icon(
+                if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (isPlaying) "暂停 $label" else "播放 $label",
+            )
+        }
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            if (isPlaying) "播放中" else "已暂停",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

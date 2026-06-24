@@ -1,6 +1,7 @@
 package com.abei.splitplay.playerui
 
 import android.content.ContentResolver
+import android.media.AudioDeviceInfo
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.widget.Toast
@@ -9,15 +10,29 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.Headset
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.SettingsInputHdmi
+import androidx.compose.material.icons.filled.Speaker
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -32,10 +47,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.abei.splitplay.core.EnginePrefs
+import com.abei.splitplay.media.AudioOutput
+import com.abei.splitplay.media.DisplayInfo
 import com.abei.splitplay.media.PlayerEngineRegistry
 import com.abei.splitplay.media.PlayerEngineType
 import kotlinx.coroutines.flow.first
@@ -280,14 +299,288 @@ private fun EngineOption(
 }
 
 /**
+ * 音频输出设备 radio 列表。`outputs` 来自 [com.abei.splitplay.media.AudioDeviceRepository],
+ * 设备热插拔会自动反应在这里。`selected == null` 表示"系统默认",作为列表第一项。
+ *
+ * 仅在详情页/全屏的 [SettingsDialog] 内启用 —— 首页弹窗不挂这个 section,因为
+ * 首页没有 PlayerViewModel 实例,设备路由只在播放时才有意义。
+ */
+@Composable
+internal fun AudioOutputSection(
+    outputs: List<AudioOutput>,
+    selected: AudioOutput?,
+    onSelect: (AudioOutput?) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("音频输出", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "选中某个设备后,播放的声音会优先送往它;拔出该设备会自动回到系统默认。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.size(4.dp))
+            // 第一项固定是"系统默认",对应 selected == null;后续按系统给的顺序展开。
+            AudioOutputRow(
+                icon = Icons.AutoMirrored.Filled.VolumeUp,
+                title = "系统默认",
+                subtitle = "由系统按当前路由策略选择(等价于不勾任何设备)",
+                selected = selected == null,
+                onClick = { onSelect(null) },
+            )
+            outputs.forEach { out ->
+                AudioOutputRow(
+                    icon = iconForType(out.type),
+                    title = out.name,
+                    subtitle = out.typeLabel,
+                    selected = selected?.id == out.id,
+                    onClick = { onSelect(out) },
+                )
+            }
+            if (outputs.isEmpty()) {
+                Text(
+                    "未检测到额外的音频输出设备。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AudioOutputRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp),
+        )
+        Box(modifier = Modifier.padding(start = 12.dp)) {
+            Column {
+                Text(title, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 播放模式 radio:SINGLE / SPLIT。切到 SPLIT 后引擎会被重建为
+ * [com.abei.splitplay.media.DualPlayerEngine](一个 audio-only 引擎 + 一个 video-only 引擎),
+ * 详情页 UI 同时挂出两条独立控制条。当前播放会以快照的 (uri, position, speed) 续上。
+ */
+@Composable
+internal fun PlaybackModeSection(
+    mode: PlaybackMode,
+    onSelect: (PlaybackMode) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("播放模式", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "SPLIT 模式下音视频走两个独立引擎,可以单独暂停/播放;场景 A(HiFi 听歌 + 静音 MV)用。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.size(4.dp))
+            PlaybackModeRow(
+                title = "SINGLE — 单引擎",
+                subtitle = "音视频走同一个 ExoPlayer 实例(默认,资源占用低)",
+                selected = mode == PlaybackMode.SINGLE,
+                onClick = { onSelect(PlaybackMode.SINGLE) },
+            )
+            PlaybackModeRow(
+                title = "SPLIT — 音视频分离",
+                subtitle = "两个独立引擎 + 时钟同步,详情页出现双控制条",
+                selected = mode == PlaybackMode.SPLIT,
+                onClick = { onSelect(PlaybackMode.SPLIT) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlaybackModeRow(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Box(modifier = Modifier.padding(start = 8.dp)) {
+            Column {
+                Text(title, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 视频输出显示设备的 radio 列表。`displays` 列表里 [DisplayInfo.isMain] 项作为
+ * "本机屏幕"渲染,选中等价于关闭外接 Presentation。
+ *
+ * 仅在详情页/全屏的 [SettingsDialog] 内启用,首页弹窗不挂这个 section。
+ */
+@Composable
+internal fun VideoOutputSection(
+    displays: List<DisplayInfo>,
+    selected: DisplayInfo?,
+    onSelect: (DisplayInfo?) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("视频输出", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "选中某块外接屏,画面会投到那块屏上,本机仅保留控制面板;拔掉外接屏会自动回主屏。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.size(4.dp))
+            // 第一项总是主屏(取 displays 里 isMain == true 的那条;没有就显示占位)。
+            val main = displays.firstOrNull { it.isMain }
+            VideoOutputRow(
+                icon = Icons.Filled.PhoneAndroid,
+                title = main?.name ?: "本机屏幕",
+                subtitle = "默认(不投屏)",
+                selected = selected == null,
+                onClick = { onSelect(main) },
+            )
+            displays.filter { !it.isMain }.forEach { d ->
+                VideoOutputRow(
+                    icon = Icons.Filled.Tv,
+                    title = d.name,
+                    subtitle = "外接屏",
+                    selected = selected?.id == d.id,
+                    onClick = { onSelect(d) },
+                )
+            }
+            if (displays.none { !it.isMain }) {
+                Text(
+                    "未检测到外接屏。连接 HDMI / DisplayPort / 无线投屏后会自动出现。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VideoOutputRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp),
+        )
+        Box(modifier = Modifier.padding(start = 12.dp)) {
+            Column {
+                Text(title, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+private fun iconForType(type: Int): ImageVector = when (type) {
+    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+    -> Icons.Filled.Bluetooth
+    AudioDeviceInfo.TYPE_USB_DEVICE,
+    AudioDeviceInfo.TYPE_USB_HEADSET,
+    AudioDeviceInfo.TYPE_USB_ACCESSORY,
+    -> Icons.Filled.Usb
+    AudioDeviceInfo.TYPE_WIRED_HEADSET -> Icons.Filled.Headset
+    AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> Icons.Filled.Headphones
+    AudioDeviceInfo.TYPE_HDMI,
+    AudioDeviceInfo.TYPE_HDMI_ARC,
+    -> Icons.Filled.SettingsInputHdmi
+    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> Icons.Filled.Speaker
+    else -> Icons.AutoMirrored.Filled.VolumeUp
+}
+
+/**
  * 复用的播放器/服务器设置弹窗。首页和详情页都通过它打开,内容就是 [EngineSection]。
  * 走 AlertDialog 是因为这玩意需求是"随时可调"——比 push 到独立 screen 体验顺。
+ *
+ * 详情页传 `viewModel` 进来 → 弹窗里加挂"音频输出"section;首页没有 VM,
+ * 仅显示引擎选择 + 服务器地址。
  */
 @Composable
 fun SettingsDialog(
     open: Boolean,
     prefs: EnginePrefs,
     onDismiss: () -> Unit,
+    viewModel: PlayerViewModel? = null,
 ) {
     if (!open) return
     AlertDialog(
@@ -299,8 +592,35 @@ fun SettingsDialog(
         text = {
             // 引擎 + 服务器地址内嵌在 EngineSection 里;弹窗本身按内容自适应高度,
             // 屏幕小的时候 dialog 自带 scroll 还不够稳,这里再外包一层 verticalScroll。
-            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
                 EngineSection(prefs = prefs)
+                if (viewModel != null) {
+                    val mode by viewModel.playbackMode.collectAsStateWithLifecycle()
+                    PlaybackModeSection(
+                        mode = mode,
+                        onSelect = viewModel::setPlaybackMode,
+                    )
+
+                    val outputs by viewModel.audioOutputs.collectAsStateWithLifecycle()
+                    val selectedAudio by viewModel.selectedAudioOutput.collectAsStateWithLifecycle()
+                    AudioOutputSection(
+                        outputs = outputs,
+                        selected = selectedAudio,
+                        onSelect = viewModel::selectAudioOutput,
+                    )
+
+                    val displays by viewModel.displays.collectAsStateWithLifecycle()
+                    val selectedDisplay by viewModel.selectedDisplay.collectAsStateWithLifecycle()
+                    val controller = LocalVideoOutputController.current
+                    VideoOutputSection(
+                        displays = displays,
+                        selected = selectedDisplay,
+                        onSelect = { d -> viewModel.selectDisplay(d, controller) },
+                    )
+                }
             }
         },
     )

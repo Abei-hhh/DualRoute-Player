@@ -1,13 +1,16 @@
 package com.abei.splitplay.media
 
 import android.content.Context
+import android.media.AudioDeviceInfo
 import android.net.Uri
 import android.view.Surface
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -18,19 +21,50 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * M1 single-player engine: wraps a single ExoPlayer instance.
- * M2 will split into AudioPlayerEngine / VideoPlayerEngine.
+ * Single-player engine: wraps a single ExoPlayer instance.
+ *
+ * 通过 [channel] 决定承载哪些轨道:
+ *  - [PlayerChannel.BOTH](默认)= M1 老行为,音视频齐全
+ *  - [PlayerChannel.AUDIO_ONLY] = 用 [AudioOnlyRenderersFactory] 物理阻断 video renderer,
+ *    再叠加 `TrackSelector.setTrackTypeDisabled(VIDEO, true)` 防 HLS 中途冒视频轨
+ *  - [PlayerChannel.VIDEO_ONLY] = 对称做法,无声播视频
+ *
+ * M2b 的 [DualPlayerEngine] 会创建一对 AUDIO_ONLY + VIDEO_ONLY 实例组合使用。
  */
+@OptIn(UnstableApi::class)
 class SinglePlayerEngine(
     context: Context,
     scope: CoroutineScope,
+    private val channel: PlayerChannel = PlayerChannel.BOTH,
 ) : PlayerEngine {
 
     // 走带缓存的 MediaSource.Factory:本地 URI 直读不入缓存,http(s) 会走 CacheDataSource
     // → 命中即从磁盘读、未命中边下边播并落盘。无需本地代理(详见 MediaCache 注释)。
     private val exo: ExoPlayer = ExoPlayer.Builder(context.applicationContext)
         .setMediaSourceFactory(MediaCache.mediaSourceFactory(context.applicationContext))
+        .apply {
+            when (channel) {
+                PlayerChannel.AUDIO_ONLY ->
+                    setRenderersFactory(AudioOnlyRenderersFactory(context.applicationContext))
+                PlayerChannel.VIDEO_ONLY ->
+                    setRenderersFactory(VideoOnlyRenderersFactory(context.applicationContext))
+                PlayerChannel.BOTH -> Unit
+            }
+        }
         .build()
+        .also { player ->
+            // 双保险:RenderersFactory 阻断后,TrackSelector 再禁一次。HLS 等容器可能
+            // 在 prepare 之后动态增加 track,只靠 RenderersFactory 就漏了。
+            val disableVideo = channel == PlayerChannel.AUDIO_ONLY
+            val disableAudio = channel == PlayerChannel.VIDEO_ONLY
+            if (disableVideo || disableAudio) {
+                player.trackSelectionParameters = player.trackSelectionParameters
+                    .buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, disableVideo)
+                    .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, disableAudio)
+                    .build()
+            }
+        }
     private val _state = MutableStateFlow(PlaybackState())
 
     override val state: StateFlow<PlaybackState> = _state.asStateFlow()
@@ -108,6 +142,12 @@ class SinglePlayerEngine(
 
     override fun setVideoSurface(surface: Surface?) {
         exo.setVideoSurface(surface)
+    }
+
+    override fun setPreferredAudioDevice(info: AudioDeviceInfo?) {
+        // ExoPlayer 内部转给 DefaultAudioSink → AudioTrack.setPreferredDevice。
+        // 传 null 把路由交还系统(等价于"自动"),用于设备被拔掉时 fallback。
+        exo.setPreferredAudioDevice(info)
     }
 
     override fun release() {

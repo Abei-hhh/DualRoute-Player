@@ -1,0 +1,56 @@
+package com.abei.splitplay.media
+
+import android.content.Context
+import android.os.Handler
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.audio.AudioRendererEventListener
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.video.VideoRendererEventListener
+import java.util.ArrayList
+
+/**
+ * 对称版:仅创建视频 renderer;audio renderer 直接 no-op。M2b 双 Player 拆分时,
+ * 给 video-only ExoPlayer 用 —— 配 [SinglePlayerEngine] 里 channel == VIDEO_ONLY 的
+ * TrackSelector 禁轨,从根上不可能解出音频。
+ */
+@UnstableApi
+class VideoOnlyRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
+
+    override fun buildAudioRenderers(
+        context: Context,
+        extensionRendererMode: Int,
+        mediaCodecSelector: MediaCodecSelector,
+        enableDecoderFallback: Boolean,
+        audioSink: AudioSink,
+        eventHandler: Handler,
+        eventListener: AudioRendererEventListener,
+        out: ArrayList<Renderer>,
+    ) {
+        // no-op:不创建任何音频 renderer,out 列表保持空。
+    }
+
+    override fun buildVideoRenderers(
+        context: Context,
+        extensionRendererMode: Int,
+        mediaCodecSelector: MediaCodecSelector,
+        enableDecoderFallback: Boolean,
+        eventHandler: Handler,
+        eventListener: VideoRendererEventListener,
+        allowedVideoJoiningTimeMs: Long,
+        out: ArrayList<Renderer>,
+    ) {
+        super.buildVideoRenderers(
+            context,
+            extensionRendererMode,
+            mediaCodecSelector,
+            enableDecoderFallback,
+            eventHandler,
+            eventListener,
+            allowedVideoJoiningTimeMs,
+            out,
+        )
+    }
+}

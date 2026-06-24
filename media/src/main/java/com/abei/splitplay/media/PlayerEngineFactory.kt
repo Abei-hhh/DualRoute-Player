@@ -29,16 +29,28 @@ enum class PlayerEngineType(val displayName: String, val description: String) {
  * 每个 [PlayerEngineType] 提供一个工厂,用统一的 (Context, CoroutineScope) 创建出
  * 实现了 [PlayerEngine] 的实例。未实现的工厂在 [create] 时抛 [NotImplementedError],
  * 上层兜底回退到 ExoPlayer。
+ *
+ * [PlayerChannel] 重载:M2b 需要在同一个工厂上既能拿到 BOTH 引擎,也能拿到 AUDIO_ONLY /
+ * VIDEO_ONLY 通道分离的引擎。默认实现忽略 channel —— stub 内核(IjkPlayer / Custom)
+ * 还没拆,继续拿 BOTH;真实现的 ExoPlayer 工厂会重写,真正建分通道引擎。
  */
 interface PlayerEngineFactory {
     val type: PlayerEngineType
     fun create(context: Context, scope: CoroutineScope): PlayerEngine
+    fun create(context: Context, scope: CoroutineScope, channel: PlayerChannel): PlayerEngine =
+        create(context, scope)
 }
 
 object ExoPlayerEngineFactory : PlayerEngineFactory {
     override val type = PlayerEngineType.EXOPLAYER
     override fun create(context: Context, scope: CoroutineScope): PlayerEngine =
-        SinglePlayerEngine(context, scope)
+        SinglePlayerEngine(context, scope, PlayerChannel.BOTH)
+
+    override fun create(
+        context: Context,
+        scope: CoroutineScope,
+        channel: PlayerChannel,
+    ): PlayerEngine = SinglePlayerEngine(context, scope, channel)
 }
 
 object IjkPlayerEngineFactory : PlayerEngineFactory {

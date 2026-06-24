@@ -40,4 +40,5 @@ dependencies {
     // implementation(libs.ijkplayer.armv7a)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }

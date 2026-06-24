@@ -1,5 +1,6 @@
 package com.abei.splitplay.media
 
+import android.media.AudioDeviceInfo
 import android.net.Uri
 import android.view.Surface
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +27,14 @@ interface PlayerEngine {
 
     /** 绑定视频输出。Surface 销毁时传 `null`,引擎需要释放对它的引用避免 native 端继续写入。 */
     fun setVideoSurface(surface: Surface?)
+
+    /**
+     * 指定首选音频输出设备。`null` 表示交还给系统默认路由。
+     *
+     * 默认 no-op —— 不支持设备路由的内核(IjkPlayer / 自实现等)直接忽略,
+     * 这样调用方不需要做类型分支,Phase 1 只是没效果而已,不会崩。
+     */
+    fun setPreferredAudioDevice(info: AudioDeviceInfo?) = Unit
 
     fun release()
 }
