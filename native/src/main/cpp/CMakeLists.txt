@@ -31,6 +31,7 @@ add_library(ffmpegwrapper SHARED
     capability.cpp
     ffmpeg_jni.cpp
     audio_decoder.cpp
+    video_decoder.cpp
 )
 
 target_include_directories(ffmpegwrapper PRIVATE
@@ -60,7 +61,8 @@ if(FFMPEG_AVAILABLE)
         swscale
         swresample
         log
-        z   # libz 是 FFmpeg 依赖,Android NDK 自带
+        z       # libz 是 FFmpeg 依赖,Android NDK 自带
+        android # ANativeWindow API,video_decoder.cpp 用来 blit 到 Surface
     )
 else()
     target_link_libraries(ffmpegwrapper log)

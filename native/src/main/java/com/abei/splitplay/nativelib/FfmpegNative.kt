@@ -81,6 +81,51 @@ object FfmpegNative {
     @JvmStatic
     external fun nativeAudioRelease(handle: Long)
 
+    // ---- Video decode ----
+    //
+    // 模型:native 维护 ring buffer<AVFrame>(MAX_FRAME_SLOTS=16),decode 返回 slot id,
+    // render(slot, surface) 把该 slot 的 frame 用 ANativeWindow + sws_scale 直接 blit 到 surface,
+    // releaseFrame(slot) 标 slot 空闲。Java 端把 slot id 存到 VideoDecoderOutputBuffer.decoderPrivate。
+
+    /**
+     * @return native handle(0 = 不支持/失败)
+     */
+    @JvmStatic
+    external fun nativeVideoOpen(
+        mime: String,
+        extraData: ByteArray?,
+        width: Int,
+        height: Int,
+    ): Long
+
+    /**
+     * 喂一个 packet。返回值:
+     *   `>= 0`  分配到的 frame slot id;[metaOut][0]=width [1]=height 回填
+     *   `-1`   packet 吃下但还没解出 frame(需更多 input,Media3 SimpleDecoder 自然处理)
+     *   `<-1`  错误
+     */
+    @JvmStatic
+    external fun nativeVideoDecode(
+        handle: Long,
+        inputDirect: java.nio.ByteBuffer,
+        inputSize: Int,
+        metaOut: IntArray,
+    ): Int
+
+    /** 把指定 slot 的 frame blit 到 surface。返回 0 / 负数错误码。 */
+    @JvmStatic
+    external fun nativeVideoRender(handle: Long, slot: Int, surface: android.view.Surface): Int
+
+    /** 用户层处理完 frame 后 release slot。**必须** 跟 [nativeVideoDecode] 配对。 */
+    @JvmStatic
+    external fun nativeVideoReleaseFrame(handle: Long, slot: Int)
+
+    @JvmStatic
+    external fun nativeVideoReset(handle: Long)
+
+    @JvmStatic
+    external fun nativeVideoRelease(handle: Long)
+
     // ---- meta / introspection ----
 
     @JvmStatic
