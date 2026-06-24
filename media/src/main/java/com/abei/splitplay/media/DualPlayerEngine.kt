@@ -56,6 +56,9 @@ class DualPlayerEngine(
         error = a.error ?: v.error,
         videoWidth = v.videoWidth,
         videoHeight = v.videoHeight,
+        // 主时钟(音频)结束才算整体结束 —— 视频比音频先到 EOF 时不触发自动下一首,
+        // 让最后一段音频自然放完。
+        isEnded = a.isEnded,
     )
 
     override fun setMedia(uri: Uri) {
@@ -99,6 +102,7 @@ class DualPlayerEngine(
     // 音轨跟 audio 子引擎走,字幕跟 video 子引擎走 —— 字幕渲染依赖视频时钟。
     override val audioTracks: StateFlow<List<TrackOption>> get() = audio.audioTracks
     override val subtitleTracks: StateFlow<List<TrackOption>> get() = video.subtitleTracks
+    override val cues: StateFlow<List<SubtitleCue>> get() = video.cues
 
     override fun selectTrack(option: TrackOption) {
         when (option.type) {

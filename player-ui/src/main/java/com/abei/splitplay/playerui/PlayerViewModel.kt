@@ -7,6 +7,7 @@ import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.abei.splitplay.core.EnginePrefs
+import com.abei.splitplay.core.PlaybackQueue
 import com.abei.splitplay.core.ResumeStore
 import com.abei.splitplay.media.AudioDeviceRepository
 import com.abei.splitplay.media.AudioOutput
@@ -22,6 +23,7 @@ import com.abei.splitplay.media.PlayerEngine
 import com.abei.splitplay.media.PlayerEngineFactory
 import com.abei.splitplay.media.PlayerEngineRegistry
 import com.abei.splitplay.media.PlayerEngineType
+import com.abei.splitplay.media.SubtitleCue
 import com.abei.splitplay.media.TrackOption
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -216,7 +218,67 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _engine.flatMapLatest { it.subtitleTracks }
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    /** 当前帧字幕 cues。UI 的 SubtitleOverlay 直接订阅。 */
+    val cues: StateFlow<List<SubtitleCue>> =
+        _engine.flatMapLatest { it.cues }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
     fun selectTrack(option: TrackOption) = _engine.value.selectTrack(option)
+
+    /** 当前播放队列(由 :app/Gallery 写,Player 读),决定是否显示上/下一首按钮。 */
+    val queue: StateFlow<PlaybackQueue.State> = PlaybackQueue.state
+
+    /** UI 按钮一拍触发下一首;若超界 no-op。自动连播由 init 里监听 isEnded 完成。 */
+    fun playNext() {
+        val nextUri = PlaybackQueue.next() ?: return
+        setMedia(nextUri)
+    }
+
+    fun playPrev() {
+        val prevUri = PlaybackQueue.prev() ?: return
+        setMedia(prevUri)
+    }
+
+    /**
+     * AB 循环 / A-B 标点。
+     *  - [LoopRange.a] / [LoopRange.b] = 两个时间点(ms);b > a 时启用循环
+     *  - 只 a / 只 b 标了:UI 显示已标但未启用,等另一端
+     *  - 启用后由 init 里的 tick 协程在 position 越过 b 时自动 seek 回 a
+     *
+     * 不持久化 —— AB 循环是当前会话的"操作意图",换文件就该重置。
+     */
+    data class LoopRange(val a: Long?, val b: Long?) {
+        val isActive: Boolean get() = a != null && b != null && b > a
+    }
+
+    private val _loopRange = MutableStateFlow(LoopRange(null, null))
+    val loopRange: StateFlow<LoopRange> = _loopRange
+
+    /** 把当前播放位置标记为 A 点。若已有 B 且 B <= 新 A,顺手清掉 B。 */
+    fun markLoopA() {
+        val pos = _engine.value.state.value.positionMs
+        val current = _loopRange.value
+        val newB = current.b?.takeIf { it > pos }
+        _loopRange.value = LoopRange(a = pos, b = newB)
+    }
+
+    /** 把当前播放位置标记为 B 点。若 A 还没标或 B <= A,这次只更新 B。 */
+    fun markLoopB() {
+        val pos = _engine.value.state.value.positionMs
+        val current = _loopRange.value
+        _loopRange.value = current.copy(b = pos)
+    }
+
+    fun clearLoop() {
+        _loopRange.value = LoopRange(null, null)
+    }
+
+    /** 换视频时自动清掉 AB 标记 —— 旧标点在新文件上没意义。 */
+    private fun resetLoopOnMediaChange() {
+        if (_loopRange.value != LoopRange(null, null)) {
+            _loopRange.value = LoopRange(null, null)
+        }
+    }
 
     val uiState: StateFlow<PlayerUiState> =
         combine(
@@ -296,6 +358,45 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     _engine.value.setPreferredAudioDevice(match?.info)
                 }
             }
+        }
+
+        // 播放结束自动下一首:监听 combinedPlayback.isEnded(从 false 翻 true 一次)。
+        // 用 flag 防止 ENDED 状态被 polling 重复触发同一次 next。
+        viewModelScope.launch {
+            var lastEndedHandled = false
+            combinedPlayback.collect { pb ->
+                if (pb.isEnded && !lastEndedHandled && pb.durationMs > 0) {
+                    lastEndedHandled = true
+                    // 还有下一首就播,没有就停在 ENDED 状态(用户可以手动点上一首/回画廊)。
+                    if (PlaybackQueue.state.value.hasNext) {
+                        playNext()
+                    }
+                } else if (!pb.isEnded) {
+                    lastEndedHandled = false
+                }
+            }
+        }
+
+        // AB 循环 tick:监听 combinedPlayback,只在 isActive && isPlaying 时生效。
+        // 因为 combinedPlayback 已经走 flatMapLatest 跟随 engine 切换,这里跟着 collect 就好。
+        // 用 lastTriggerMs 避免一帧内连续 emit 重复 seek。
+        viewModelScope.launch {
+            var lastTriggerMs = 0L
+            combine(combinedPlayback, _loopRange) { pb, lr -> pb to lr }
+                .collect { (pb, lr) ->
+                    if (!lr.isActive || !pb.isPlaying) return@collect
+                    val a = lr.a ?: return@collect
+                    val b = lr.b ?: return@collect
+                    // position 落入 [b, b+500ms) 视为"越过 B 点",seek 回 A。
+                    // 500ms 窗口避免 polling 250ms 间隔时漏掉 b 那一拍。
+                    val pos = pb.positionMs
+                    if (pos >= b && pos < b + 500L) {
+                        if (pos - lastTriggerMs > 400L) {
+                            _engine.value.seekTo(a)
+                            lastTriggerMs = pos
+                        }
+                    }
+                }
         }
 
         // 编解码能力扫描:跑在 IO 调度器上避免阻塞主线程构造路径,扫一次落到 StateFlow。
@@ -448,6 +549,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
         _mediaUri.value = uri
         lastSavedPosition = -1L
+        resetLoopOnMediaChange()
         viewModelScope.launch {
             val saved = resumeStore.load(uri.toString())
             _engine.value.setMedia(uri, saved)

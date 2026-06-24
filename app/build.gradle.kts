@@ -45,6 +45,9 @@ dependencies {
     implementation(project(":media"))
     implementation(project(":player-ui"))
 
+    // 后台音频播放服务用
+    implementation(libs.androidx.media3.session)
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)

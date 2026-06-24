@@ -49,13 +49,33 @@ interface PlayerEngine {
 
     fun selectTrack(option: TrackOption) = Unit
 
+    /**
+     * 当前帧的字幕 cue 列表(按显示时间已过滤好,直接渲染即可)。
+     * 默认空 —— 不支持字幕的引擎(IjkPlayer 等)UI 不会显示字幕层。
+     */
+    val cues: StateFlow<List<SubtitleCue>> get() = EMPTY_CUES
+
     fun release()
 
     private companion object {
         val EMPTY_TRACKS: StateFlow<List<TrackOption>> =
             MutableStateFlow<List<TrackOption>>(emptyList()).asStateFlow()
+        val EMPTY_CUES: StateFlow<List<SubtitleCue>> =
+            MutableStateFlow<List<SubtitleCue>>(emptyList()).asStateFlow()
     }
 }
+
+/**
+ * 引擎无关的字幕 cue 抽象。Media3 内部有 `androidx.media3.common.text.Cue`,但我们不在
+ * [PlayerEngine] 接口暴露 Media3 类型,避免 IjkPlayer / 自实现引擎被绑死。
+ *
+ * [renderable] 是 Media3 的 `Cue` 对象(实现侧透出),给 :player-ui 的渲染层直接喂给
+ * `SubtitleView.setCues(...)` 用;非 Media3 引擎可以传 null,UI 用纯文本兜底渲染 [text]。
+ */
+data class SubtitleCue(
+    val text: String,
+    val renderable: Any? = null,
+)
 
 /**
  * 一个可选的音轨或字幕轨。`id` 是引擎内部稳定标识(不同引擎实现自由组装),
@@ -82,4 +102,6 @@ data class PlaybackState(
     /** 当前轨道的视频宽高(px);未知/纯音频时为 0。 */
     val videoWidth: Int = 0,
     val videoHeight: Int = 0,
+    /** 播放到末尾。上层用它触发"自动下一首";engine 自身不会做任何 seek。 */
+    val isEnded: Boolean = false,
 )

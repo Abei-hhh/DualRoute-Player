@@ -13,6 +13,7 @@ import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
+import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.CoroutineScope
@@ -71,10 +72,12 @@ class SinglePlayerEngine(
     private val _state = MutableStateFlow(PlaybackState())
     private val _audioTracks = MutableStateFlow<List<TrackOption>>(emptyList())
     private val _subtitleTracks = MutableStateFlow<List<TrackOption>>(emptyList())
+    private val _cues = MutableStateFlow<List<SubtitleCue>>(emptyList())
 
     override val state: StateFlow<PlaybackState> = _state.asStateFlow()
     override val audioTracks: StateFlow<List<TrackOption>> = _audioTracks.asStateFlow()
     override val subtitleTracks: StateFlow<List<TrackOption>> = _subtitleTracks.asStateFlow()
+    override val cues: StateFlow<List<SubtitleCue>> = _cues.asStateFlow()
 
     /** Compose 端如果需要直接拿 Media3 Player(比如挂 PlayerSurface)走这里。 */
     val player: Player get() = exo
@@ -88,6 +91,16 @@ class SinglePlayerEngine(
             _state.update { it.copy(error = error) }
         }
         override fun onTracksChanged(tracks: Tracks) = refreshTracks(tracks)
+        override fun onCues(cueGroup: CueGroup) {
+            // 把 Media3 Cue 转成中立 SubtitleCue:text 给非渲染消费者(测试/日志)用,
+            // renderable 透传原 Cue 给 :player-ui 的 SubtitleView 渲染。
+            _cues.value = cueGroup.cues.map { cue ->
+                SubtitleCue(
+                    text = cue.text?.toString().orEmpty(),
+                    renderable = cue,
+                )
+            }
+        }
     }
 
     init {
@@ -98,6 +111,11 @@ class SinglePlayerEngine(
                 if (exo.isPlaying) pushState()
                 delay(POLL_INTERVAL_MS)
             }
+        }
+        // 暴露 player 引用给后台 Service,只有 BOTH 和 AUDIO_ONLY 通道才注册 —— VIDEO_ONLY
+        // 不含音频,挂上去后台只是看着 player 在 idle,没必要。
+        if (channel != PlayerChannel.VIDEO_ONLY) {
+            BackgroundPlaybackBridge.attach(exo)
         }
     }
 
@@ -112,6 +130,7 @@ class SinglePlayerEngine(
             error = null,
             videoWidth = size.width,
             videoHeight = size.height,
+            isEnded = exo.playbackState == Player.STATE_ENDED,
         )
     }
 
@@ -249,6 +268,7 @@ class SinglePlayerEngine(
     private data class TrackId(val groupIndex: Int, val trackIndex: Int)
 
     override fun release() {
+        BackgroundPlaybackBridge.detach(exo)
         exo.removeListener(listener)
         exo.release()
     }

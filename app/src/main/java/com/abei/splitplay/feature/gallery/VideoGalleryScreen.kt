@@ -104,7 +104,11 @@ fun VideoGalleryScreen(
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
-        uri?.let { onPickFromFile(it) }
+        uri?.let {
+            // SAF 单文件:队列降级为单元素,Player 自然没有上下一首入口。
+            com.abei.splitplay.core.PlaybackQueue.singleton(it)
+            onPickFromFile(it)
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -207,7 +211,14 @@ fun VideoGalleryScreen(
                 else -> {
                     VideoGrid(
                         videos = state.videos,
-                        onVideoClick = onVideoClick,
+                        onVideoClick = { uri ->
+                            // 把整列视频塞到播放队列里,选中项做 currentIndex。
+                            // PlayerViewModel 启动时读这个队列,naturally 支持上下一首。
+                            val all = state.videos.map { it.uri }
+                            val idx = all.indexOf(uri).coerceAtLeast(0)
+                            com.abei.splitplay.core.PlaybackQueue.set(all, idx)
+                            onVideoClick(uri)
+                        },
                         modifier = Modifier.weight(1f),
                     )
                 }

@@ -50,12 +50,15 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -121,16 +124,11 @@ fun PlayerScreen(
         }
     }
 
+    // 以前在 ON_STOP 时自动暂停播放(防止后台还在解码耗电),但现在 Phase 11 后台音频接入后,
+    // 我们希望音频在后台继续播 —— PlaybackBackgroundService 会接管 MediaSession + 前台通知。
+    // 视频引擎依然会因 Surface 被 detach 而自然停止 video renderer 工作,纯音频继续走。
+    @Suppress("UNUSED_VARIABLE")
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP && state.playback.isPlaying) {
-                viewModel.togglePlayPause()
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
 
     // System bars visibility
     val window = remember(view) { (context as ComponentActivity).window }
@@ -294,6 +292,15 @@ private fun VideoSurface(
                 )
             }
         }
+        // 字幕渲染:仅在主屏(Local sink)下叠加;外屏模式下字幕应该跟随画面去外屏,
+        // 这里暂不处理(Presentation 内部 SurfaceView 上叠字幕需要把 cues 跨 Activity-Display
+        // 传过去,后续真接 PRD-v2 语言学习场景时再加)。
+        if (sink is PlayerViewModel.VideoSink.Local) {
+            SubtitleOverlay(
+                viewModel = viewModel,
+                modifier = Modifier.align(Alignment.BottomCenter),
+            )
+        }
         // 外屏模式下叠加一个提示,告诉用户画面去了哪里。
         if (sink is PlayerViewModel.VideoSink.External) {
             val selected by viewModel.selectedDisplay.collectAsStateWithLifecycle()
@@ -304,6 +311,37 @@ private fun VideoSurface(
             )
         }
     }
+}
+
+/**
+ * 字幕渲染层。订阅 [PlayerViewModel.cues],转回 Media3 `Cue` 喂给 `SubtitleView`。
+ * 引擎透出的 `SubtitleCue.renderable` 在 [com.abei.splitplay.media.SinglePlayerEngine]
+ * 里装的就是 `androidx.media3.common.text.Cue`,这里做一次 `as?` 信任边界还原。
+ *
+ * 全屏 / 详情页都挂这一份;字幕被 [PlayerEngine.selectTrack] 关掉后 cues 自动为空 —— 这里
+ * 不需要再手动隐藏 view。
+ */
+@OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+private fun SubtitleOverlay(viewModel: PlayerViewModel, modifier: Modifier = Modifier) {
+    val cues by viewModel.cues.collectAsStateWithLifecycle()
+    val media3Cues = remember(cues) {
+        cues.mapNotNull { it.renderable as? androidx.media3.common.text.Cue }
+    }
+    if (media3Cues.isEmpty()) return
+    AndroidView(
+        modifier = modifier.fillMaxWidth(),
+        factory = { ctx ->
+            androidx.media3.ui.SubtitleView(ctx).apply {
+                // 走系统用户设置(字体、大小、描边),最贴合各厂商习惯。
+                setUserDefaultStyle()
+                setUserDefaultTextSize()
+            }
+        },
+        update = { view ->
+            view.setCues(media3Cues)
+        },
+    )
 }
 
 /**
@@ -629,21 +667,54 @@ private fun FullscreenPlayer(state: PlayerUiState, viewModel: PlayerViewModel) {
                                 onFeedback = sendFeedback,
                                 onPickAudio = { menuExpanded = false; trackPickerType = TrackPickerType.AUDIO },
                                 onPickSubtitle = { menuExpanded = false; trackPickerType = TrackPickerType.SUBTITLE },
+                                onMarkLoopA = { menuExpanded = false; viewModel.markLoopA() },
+                                onMarkLoopB = { menuExpanded = false; viewModel.markLoopB() },
+                                onClearLoop = { menuExpanded = false; viewModel.clearLoop() },
+                                loopRange = viewModel.loopRange.collectAsStateWithLifecycle().value,
                             )
                         }
                     }
 
-                // Center play/pause
-                IconButton(
-                    onClick = viewModel::togglePlayPause,
+                // Center 控制组:上一首 / 播放暂停 / 下一首。
+                // 队列没有上下一首时,按钮 disable 而非隐藏 —— 视觉位置稳定不抖。
+                val queueState by viewModel.queue.collectAsStateWithLifecycle()
+                Row(
                     modifier = Modifier.align(Alignment.Center),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        if (state.playback.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        contentDescription = if (state.playback.isPlaying) "暂停" else "播放",
-                        tint = Color.White.copy(alpha = 0.8f),
-                        modifier = Modifier.height(64.dp).width(64.dp),
-                    )
+                    IconButton(
+                        onClick = viewModel::playPrev,
+                        enabled = queueState.hasPrev,
+                    ) {
+                        Icon(
+                            Icons.Filled.SkipPrevious,
+                            contentDescription = "上一首",
+                            tint = if (queueState.hasPrev) Color.White.copy(alpha = 0.85f)
+                                else Color.White.copy(alpha = 0.3f),
+                            modifier = Modifier.height(48.dp).width(48.dp),
+                        )
+                    }
+                    IconButton(onClick = viewModel::togglePlayPause) {
+                        Icon(
+                            if (state.playback.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = if (state.playback.isPlaying) "暂停" else "播放",
+                            tint = Color.White.copy(alpha = 0.8f),
+                            modifier = Modifier.height(64.dp).width(64.dp),
+                        )
+                    }
+                    IconButton(
+                        onClick = viewModel::playNext,
+                        enabled = queueState.hasNext,
+                    ) {
+                        Icon(
+                            Icons.Filled.SkipNext,
+                            contentDescription = "下一首",
+                            tint = if (queueState.hasNext) Color.White.copy(alpha = 0.85f)
+                                else Color.White.copy(alpha = 0.3f),
+                            modifier = Modifier.height(48.dp).width(48.dp),
+                        )
+                    }
                 }
 
                 // Bottom controls
@@ -932,6 +1003,10 @@ private fun MoreMenu(
     onFeedback: () -> Unit,
     onPickAudio: () -> Unit,
     onPickSubtitle: () -> Unit,
+    onMarkLoopA: () -> Unit,
+    onMarkLoopB: () -> Unit,
+    onClearLoop: () -> Unit,
+    loopRange: PlayerViewModel.LoopRange,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismissRequest) {
         DropdownMenuItem(
@@ -944,6 +1019,27 @@ private fun MoreMenu(
             leadingIcon = { Icon(Icons.Filled.ClosedCaption, contentDescription = null) },
             onClick = onPickSubtitle,
         )
+        // AB 循环:三个项 — 标 A / 标 B / 清除。标 B 在 A 没标时也允许(单独标记不启用循环)。
+        // 已标的位置以文本形式回显,方便用户记住自己当前的标点。
+        val aLabel = loopRange.a?.let { "已标 ${formatTime(it)}" } ?: "标记 A"
+        val bLabel = loopRange.b?.let { "已标 ${formatTime(it)}" } ?: "标记 B"
+        DropdownMenuItem(
+            text = { Text("AB 循环 · A:$aLabel") },
+            leadingIcon = { Icon(Icons.Filled.Loop, contentDescription = null) },
+            onClick = onMarkLoopA,
+        )
+        DropdownMenuItem(
+            text = { Text("AB 循环 · B:$bLabel") },
+            leadingIcon = { Icon(Icons.Filled.Loop, contentDescription = null) },
+            onClick = onMarkLoopB,
+        )
+        if (loopRange.a != null || loopRange.b != null) {
+            DropdownMenuItem(
+                text = { Text(if (loopRange.isActive) "关闭 AB 循环" else "清除 AB 标点") },
+                leadingIcon = { Icon(Icons.Filled.Loop, contentDescription = null) },
+                onClick = onClearLoop,
+            )
+        }
         DropdownMenuItem(
             text = { Text("小窗播放") },
             leadingIcon = { Icon(Icons.Filled.PictureInPictureAlt, contentDescription = null) },

@@ -78,6 +78,8 @@ androidx-media3-common = { group = "androidx.media3", name = "media3-common", ve
 # (SimpleCache + CacheDataSource + StandaloneDatabaseProvider)
 androidx-media3-datasource = { group = "androidx.media3", name = "media3-datasource", version.ref = "media3" }
 androidx-media3-database = { group = "androidx.media3", name = "media3-database", version.ref = "media3" }
+# media3-session 提供 MediaSessionService / MediaSession,后台音频通知栏控制走它
+androidx-media3-session = { group = "androidx.media3", name = "media3-session", version.ref = "media3" }
 
 # DataStore
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
