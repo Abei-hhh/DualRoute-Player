@@ -78,3 +78,5 @@ keystore.properties
 .ffmpeg-src/
 native/src/main/cpp/prebuilt/*/lib/
 native/src/main/cpp/prebuilt/*/include/
+# FFmpeg `make install` 顺手拷过来的 example .c,build wrapper 不需要
+native/src/main/cpp/prebuilt/*/share/
