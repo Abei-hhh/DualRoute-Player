@@ -9,6 +9,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.TrackGroup
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -66,8 +69,12 @@ class SinglePlayerEngine(
             }
         }
     private val _state = MutableStateFlow(PlaybackState())
+    private val _audioTracks = MutableStateFlow<List<TrackOption>>(emptyList())
+    private val _subtitleTracks = MutableStateFlow<List<TrackOption>>(emptyList())
 
     override val state: StateFlow<PlaybackState> = _state.asStateFlow()
+    override val audioTracks: StateFlow<List<TrackOption>> = _audioTracks.asStateFlow()
+    override val subtitleTracks: StateFlow<List<TrackOption>> = _subtitleTracks.asStateFlow()
 
     /** Compose 端如果需要直接拿 Media3 Player(比如挂 PlayerSurface)走这里。 */
     val player: Player get() = exo
@@ -80,6 +87,7 @@ class SinglePlayerEngine(
         override fun onPlayerError(error: PlaybackException) {
             _state.update { it.copy(error = error) }
         }
+        override fun onTracksChanged(tracks: Tracks) = refreshTracks(tracks)
     }
 
     init {
@@ -150,6 +158,96 @@ class SinglePlayerEngine(
         exo.setPreferredAudioDevice(info)
     }
 
+    override fun selectTrack(option: TrackOption) {
+        // option.id 格式见 [makeTrackId];这里反解出 (groupIndex, trackIndex) 再走
+        // setTrackSelectionParameters → TrackSelectionOverride。groupIndex=-1 表示
+        // 这是"关闭字幕"虚拟项。
+        val trackType = when (option.type) {
+            TrackType.AUDIO -> C.TRACK_TYPE_AUDIO
+            TrackType.SUBTITLE -> C.TRACK_TYPE_TEXT
+        }
+        val params = exo.trackSelectionParameters.buildUpon()
+        if (option.isDisable) {
+            // 关闭对应轨道类型(常用于字幕)。
+            params.setTrackTypeDisabled(trackType, true)
+                .clearOverridesOfType(trackType)
+        } else {
+            params.setTrackTypeDisabled(trackType, false)
+            val parsed = parseTrackId(option.id) ?: return
+            val tracks = exo.currentTracks.groups
+            val group = tracks.getOrNull(parsed.groupIndex) ?: return
+            val rawGroup: TrackGroup = group.mediaTrackGroup
+            params.setOverrideForType(TrackSelectionOverride(rawGroup, parsed.trackIndex))
+        }
+        exo.trackSelectionParameters = params.build()
+    }
+
+    /**
+     * Tracks 监听回调:把 currentTracks 映射成扁平的 [TrackOption] 列表,推到 StateFlow 上。
+     * 同一个 TrackGroup 里通常一个轨道,但 HLS / DASH 可能多个;扁平展开方便 UI radio。
+     */
+    private fun refreshTracks(tracks: Tracks) {
+        val audio = mutableListOf<TrackOption>()
+        val subs = mutableListOf<TrackOption>()
+        tracks.groups.forEachIndexed { groupIndex, group ->
+            val type = when (group.type) {
+                C.TRACK_TYPE_AUDIO -> TrackType.AUDIO
+                C.TRACK_TYPE_TEXT -> TrackType.SUBTITLE
+                else -> return@forEachIndexed
+            }
+            for (trackIndex in 0 until group.length) {
+                if (!group.isTrackSupported(trackIndex)) continue
+                val format = group.mediaTrackGroup.getFormat(trackIndex)
+                val label = buildTrackLabel(format.language, format.label, type)
+                val option = TrackOption(
+                    id = makeTrackId(groupIndex, trackIndex),
+                    label = label,
+                    type = type,
+                    isSelected = group.isTrackSelected(trackIndex),
+                )
+                if (type == TrackType.AUDIO) audio += option else subs += option
+            }
+        }
+        // 字幕额外加一个"关闭"项,选中即关字幕;当容器无字幕时这个项也就没必要出现。
+        if (subs.isNotEmpty()) {
+            val isDisabledNow = exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT) ||
+                subs.none { it.isSelected }
+            subs.add(
+                0,
+                TrackOption(
+                    id = DISABLE_SUBTITLE_ID,
+                    label = "关闭字幕",
+                    type = TrackType.SUBTITLE,
+                    isSelected = isDisabledNow,
+                    isDisable = true,
+                ),
+            )
+        }
+        _audioTracks.value = audio
+        _subtitleTracks.value = subs
+    }
+
+    private fun buildTrackLabel(language: String?, label: String?, type: TrackType): String {
+        val lang = language?.takeUnless { it.isBlank() || it == "und" }
+        val human = label?.takeUnless { it.isBlank() }
+        return when {
+            human != null && lang != null -> "$human · $lang"
+            human != null -> human
+            lang != null -> lang
+            else -> if (type == TrackType.AUDIO) "默认音轨" else "默认字幕"
+        }
+    }
+
+    private fun makeTrackId(groupIndex: Int, trackIndex: Int): String =
+        "$groupIndex:$trackIndex"
+
+    private fun parseTrackId(id: String): TrackId? {
+        val (g, t) = id.split(":", limit = 2).takeIf { it.size == 2 } ?: return null
+        return TrackId(g.toIntOrNull() ?: return null, t.toIntOrNull() ?: return null)
+    }
+
+    private data class TrackId(val groupIndex: Int, val trackIndex: Int)
+
     override fun release() {
         exo.removeListener(listener)
         exo.release()
@@ -157,5 +255,6 @@ class SinglePlayerEngine(
 
     private companion object {
         const val POLL_INTERVAL_MS = 250L
+        const val DISABLE_SUBTITLE_ID = "_disabled"
     }
 }

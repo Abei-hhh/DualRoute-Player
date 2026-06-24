@@ -10,6 +10,8 @@ import com.abei.splitplay.core.EnginePrefs
 import com.abei.splitplay.core.ResumeStore
 import com.abei.splitplay.media.AudioDeviceRepository
 import com.abei.splitplay.media.AudioOutput
+import com.abei.splitplay.media.CapabilityScanner
+import com.abei.splitplay.media.CodecCapability
 import com.abei.splitplay.media.DisplayInfo
 import com.abei.splitplay.media.DisplayRepository
 import com.abei.splitplay.media.DualPlayerEngine
@@ -20,6 +22,7 @@ import com.abei.splitplay.media.PlayerEngine
 import com.abei.splitplay.media.PlayerEngineFactory
 import com.abei.splitplay.media.PlayerEngineRegistry
 import com.abei.splitplay.media.PlayerEngineType
+import com.abei.splitplay.media.TrackOption
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -95,6 +98,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 当前可选显示设备(主屏 + 所有外接 Presentation 屏)。 */
     val displays: StateFlow<List<DisplayInfo>> = displayRepo.displays
+
+    /**
+     * 设备能力矩阵。lazy 扫描:首次有人 collect 时才跑(几十毫秒级,在 IO scheduler 上)。
+     * 系统编解码列表不会跑着变,扫一次就够,缓存在 StateFlow 里。
+     */
+    private val _capabilities = MutableStateFlow<List<CodecCapability>>(emptyList())
+    val capabilities: StateFlow<List<CodecCapability>> = _capabilities
 
     /** 选中的显示设备。`null` 或 isMain 都代表"画面留在主屏"。 */
     private val _selectedDisplay = MutableStateFlow<DisplayInfo?>(null)
@@ -198,6 +208,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             .flatMapLatest { it.state }
             .stateIn(viewModelScope, SharingStarted.Eagerly, PlaybackState())
 
+    /** 当前可选音轨/字幕轨,跟随 engine 实例切换自动重订阅。 */
+    val audioTracks: StateFlow<List<TrackOption>> =
+        _engine.flatMapLatest { it.audioTracks }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val subtitleTracks: StateFlow<List<TrackOption>> =
+        _engine.flatMapLatest { it.subtitleTracks }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    fun selectTrack(option: TrackOption) = _engine.value.selectTrack(option)
+
     val uiState: StateFlow<PlayerUiState> =
         combine(
             _mediaUri,
@@ -276,6 +296,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     _engine.value.setPreferredAudioDevice(match?.info)
                 }
             }
+        }
+
+        // 编解码能力扫描:跑在 IO 调度器上避免阻塞主线程构造路径,扫一次落到 StateFlow。
+        // MediaCodecList 在系统启动后不会变,不需要 listener / 二次扫描。
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            _capabilities.value = runCatching { CapabilityScanner.scan() }.getOrElse { emptyList() }
         }
 
         // 显示设备:监听 hotplug + reconcile 持久化的 displayId。注意 selectDisplay 真正去

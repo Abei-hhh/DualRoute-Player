@@ -96,6 +96,17 @@ class DualPlayerEngine(
         audio.setPreferredAudioDevice(info)
     }
 
+    // 音轨跟 audio 子引擎走,字幕跟 video 子引擎走 —— 字幕渲染依赖视频时钟。
+    override val audioTracks: StateFlow<List<TrackOption>> get() = audio.audioTracks
+    override val subtitleTracks: StateFlow<List<TrackOption>> get() = video.subtitleTracks
+
+    override fun selectTrack(option: TrackOption) {
+        when (option.type) {
+            TrackType.AUDIO -> audio.selectTrack(option)
+            TrackType.SUBTITLE -> video.selectTrack(option)
+        }
+    }
+
     override fun release() {
         syncer.stop()
         audio.release()

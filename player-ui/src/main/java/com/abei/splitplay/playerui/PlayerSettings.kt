@@ -54,6 +54,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.abei.splitplay.core.EnginePrefs
 import com.abei.splitplay.media.AudioOutput
+import com.abei.splitplay.media.CodecCapability
+import com.abei.splitplay.media.CodecType
 import com.abei.splitplay.media.DisplayInfo
 import com.abei.splitplay.media.PlayerEngineRegistry
 import com.abei.splitplay.media.PlayerEngineType
@@ -551,6 +553,116 @@ private fun VideoOutputRow(
     }
 }
 
+/**
+ * 编解码能力矩阵。每行 = 一个编码格式,展示硬解 / 软解两列勾选。
+ * 软解一栏目前只显示"系统自带 software MediaCodec",FFmpeg 软解还没接(M5 完成后补)。
+ * UI 故意按 video / audio 分两段渲染,让用户一眼看清"哪些视频走得动、哪些音频走得动"。
+ */
+@Composable
+internal fun CapabilityMatrixSection(capabilities: List<CodecCapability>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("编解码能力", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "本机系统对各编码的硬解/软解支持情况。软解栏=系统软 MediaCodec;FFmpeg 软解未接入,暂为 ✗。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.size(8.dp))
+            if (capabilities.isEmpty()) {
+                Text(
+                    "扫描中…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                return@Column
+            }
+            // 表头
+            CapabilityHeader()
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            val videos = capabilities.filter { it.type == CodecType.VIDEO }
+            val audios = capabilities.filter { it.type == CodecType.AUDIO }
+            if (videos.isNotEmpty()) {
+                Text("视频", style = MaterialTheme.typography.labelMedium)
+                videos.forEach { CapabilityRow(it) }
+            }
+            if (audios.isNotEmpty()) {
+                Spacer(Modifier.size(4.dp))
+                Text("音频", style = MaterialTheme.typography.labelMedium)
+                audios.forEach { CapabilityRow(it) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CapabilityHeader() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "编码",
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            "硬解",
+            modifier = Modifier.width(56.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            "软解",
+            modifier = Modifier.width(56.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun CapabilityRow(cap: CodecCapability) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(cap.displayName, style = MaterialTheme.typography.bodyMedium)
+            // codec 名字 (c2.qti.avc.decoder 之类) 给开发者调试用,小字灰色不抢主视线
+            val sub = cap.hwCodecName ?: cap.mime
+            Text(
+                sub,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text(
+            text = if (cap.hwSupport) "✓" else "✗",
+            modifier = Modifier.width(56.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (cap.hwSupport) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = if (cap.swSupport) "✓" else "✗",
+            modifier = Modifier.width(56.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (cap.swSupport) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 private fun iconForType(type: Int): ImageVector = when (type) {
     AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
     AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
@@ -620,6 +732,9 @@ fun SettingsDialog(
                         selected = selectedDisplay,
                         onSelect = { d -> viewModel.selectDisplay(d, controller) },
                     )
+
+                    val capabilities by viewModel.capabilities.collectAsStateWithLifecycle()
+                    CapabilityMatrixSection(capabilities = capabilities)
                 }
             }
         },

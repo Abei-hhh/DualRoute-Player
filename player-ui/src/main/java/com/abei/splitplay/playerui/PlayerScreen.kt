@@ -46,8 +46,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MoreVert
@@ -95,6 +97,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.ui.viewinterop.AndroidView
 import com.abei.splitplay.media.PlayerEngine
+import com.abei.splitplay.media.TrackOption
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -374,6 +377,8 @@ private fun FullscreenPlayer(state: PlayerUiState, viewModel: PlayerViewModel) {
     var dragX by remember { mutableFloatStateOf(0f) }
     var dragY by remember { mutableFloatStateOf(0f) }
     var menuExpanded by remember { mutableStateOf(false) }
+    // 选轨道弹窗:null = 未打开;否则展示对应类型的列表。两条复用同一份 AlertDialog 组件。
+    var trackPickerType by remember { mutableStateOf<TrackPickerType?>(null) }
 
     val openExternalPlayer: () -> Unit = {
         val uri = viewModel.uiState.value.mediaUri
@@ -622,6 +627,8 @@ private fun FullscreenPlayer(state: PlayerUiState, viewModel: PlayerViewModel) {
                                 onEnterPip = enterPip,
                                 onOpenExternal = openExternalPlayer,
                                 onFeedback = sendFeedback,
+                                onPickAudio = { menuExpanded = false; trackPickerType = TrackPickerType.AUDIO },
+                                onPickSubtitle = { menuExpanded = false; trackPickerType = TrackPickerType.SUBTITLE },
                             )
                         }
                     }
@@ -683,6 +690,20 @@ private fun FullscreenPlayer(state: PlayerUiState, viewModel: PlayerViewModel) {
             }
         }
         }
+    }
+
+    // 全屏内的"选音轨/字幕"弹窗。容器无对应轨道时也允许打开,内部走"空态"提示。
+    trackPickerType?.let { type ->
+        val all by when (type) {
+            TrackPickerType.AUDIO -> viewModel.audioTracks
+            TrackPickerType.SUBTITLE -> viewModel.subtitleTracks
+        }.collectAsStateWithLifecycle()
+        TrackSelectionDialog(
+            type = type,
+            tracks = all,
+            onSelect = viewModel::selectTrack,
+            onDismiss = { trackPickerType = null },
+        )
     }
 }
 
@@ -909,8 +930,20 @@ private fun MoreMenu(
     onEnterPip: () -> Unit,
     onOpenExternal: () -> Unit,
     onFeedback: () -> Unit,
+    onPickAudio: () -> Unit,
+    onPickSubtitle: () -> Unit,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismissRequest) {
+        DropdownMenuItem(
+            text = { Text("音轨") },
+            leadingIcon = { Icon(Icons.Filled.Audiotrack, contentDescription = null) },
+            onClick = onPickAudio,
+        )
+        DropdownMenuItem(
+            text = { Text("字幕") },
+            leadingIcon = { Icon(Icons.Filled.ClosedCaption, contentDescription = null) },
+            onClick = onPickSubtitle,
+        )
         DropdownMenuItem(
             text = { Text("小窗播放") },
             leadingIcon = { Icon(Icons.Filled.PictureInPictureAlt, contentDescription = null) },
@@ -936,6 +969,66 @@ private fun MoreMenu(
             },
         )
     }
+}
+
+internal enum class TrackPickerType { AUDIO, SUBTITLE }
+
+/**
+ * 音轨/字幕单选弹窗。容器没有对应轨道时,空状态显示"无可用 XX"。
+ * 注意:option.id 是引擎给的稳定标识,不要手动构造。
+ */
+@Composable
+internal fun TrackSelectionDialog(
+    type: TrackPickerType,
+    tracks: List<TrackOption>,
+    onSelect: (TrackOption) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val title = when (type) {
+        TrackPickerType.AUDIO -> "选择音轨"
+        TrackPickerType.SUBTITLE -> "选择字幕"
+    }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("取消") }
+        },
+        title = { Text(title) },
+        text = {
+            if (tracks.isEmpty()) {
+                Text(
+                    when (type) {
+                        TrackPickerType.AUDIO -> "当前媒体没有可切换的音轨"
+                        TrackPickerType.SUBTITLE -> "当前媒体没有字幕"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                ) {
+                    tracks.forEach { opt ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            androidx.compose.material3.RadioButton(
+                                selected = opt.isSelected,
+                                onClick = {
+                                    onSelect(opt)
+                                    onDismiss()
+                                },
+                            )
+                            Text(opt.label, modifier = Modifier.padding(start = 8.dp))
+                        }
+                    }
+                }
+            }
+        },
+    )
 }
 
 /** 进入画中画。API 26+ 才支持;低版本提示一下。 */
