@@ -73,3 +73,8 @@ keystore.properties
 # Plan / scratch files
 .claude/plans/
 
+
+# FFmpeg build artifacts (regenerate via scripts/build_ffmpeg.sh)
+.ffmpeg-src/
+native/src/main/cpp/prebuilt/*/lib/
+native/src/main/cpp/prebuilt/*/include/

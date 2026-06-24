@@ -13,6 +13,7 @@ import com.abei.splitplay.media.AudioDeviceRepository
 import com.abei.splitplay.media.AudioOutput
 import com.abei.splitplay.media.CapabilityScanner
 import com.abei.splitplay.media.CodecCapability
+import com.abei.splitplay.media.DecoderPolicy
 import com.abei.splitplay.media.DisplayInfo
 import com.abei.splitplay.media.DisplayRepository
 import com.abei.splitplay.media.DualPlayerEngine
@@ -135,13 +136,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _playbackMode = MutableStateFlow(initialMode)
     val playbackMode: StateFlow<PlaybackMode> = _playbackMode
 
+    private val initialPolicy: DecoderPolicy = runCatching {
+        DecoderPolicy.fromName(runBlocking { enginePrefs.decoderPolicy.first() })
+    }.getOrElse { DecoderPolicy.AUTO }
+    private val _decoderPolicy = MutableStateFlow(initialPolicy)
+    val decoderPolicy: StateFlow<DecoderPolicy> = _decoderPolicy
+
     /**
      * 当前 engine 实例。**包内 `var`,模式切换时会换新实例。**
      * UI 通过 [bindLocalSurface] / [selectAudioOutput] 等方法间接调引擎,不直接读这个属性,
      * 避免在 swap 瞬间拿到 stale 引用。
      */
     private val _engine: MutableStateFlow<PlayerEngine> =
-        MutableStateFlow(createEngine(app, initialMode))
+        MutableStateFlow(createEngine(app, initialMode, initialPolicy))
 
     private fun engineFactory(): PlayerEngineFactory {
         val saved = runBlocking { enginePrefs.engineType.first() }
@@ -152,20 +159,24 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 根据 [EnginePrefs] 的引擎内核选择 + 当前 [PlaybackMode] 实例化一个 [PlayerEngine]。
+     * 根据 [EnginePrefs] 的引擎内核选择 + 当前 [PlaybackMode] + [DecoderPolicy] 实例化引擎。
      * 没实现的内核 ([PlayerEngineType.IJK] / [PlayerEngineType.CUSTOM])会抛
      * [NotImplementedError],这里兜底回退到 ExoPlayer,让用户至少能继续看视频。
      */
-    private fun createEngine(app: Application, mode: PlaybackMode): PlayerEngine {
+    private fun createEngine(
+        app: Application,
+        mode: PlaybackMode,
+        policy: DecoderPolicy,
+    ): PlayerEngine {
         val factory = engineFactory()
         return runCatching {
             when (mode) {
                 PlaybackMode.SINGLE ->
-                    factory.create(app, viewModelScope, PlayerChannel.BOTH)
+                    factory.create(app, viewModelScope, PlayerChannel.BOTH, policy)
                 PlaybackMode.SPLIT ->
                     DualPlayerEngine(
-                        audio = factory.create(app, viewModelScope, PlayerChannel.AUDIO_ONLY),
-                        video = factory.create(app, viewModelScope, PlayerChannel.VIDEO_ONLY),
+                        audio = factory.create(app, viewModelScope, PlayerChannel.AUDIO_ONLY, policy),
+                        video = factory.create(app, viewModelScope, PlayerChannel.VIDEO_ONLY, policy),
                         scope = viewModelScope,
                     )
             }
@@ -174,11 +185,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             // 不写回 pref,保留用户选择,等对应引擎后续真接入了再生效。
             when (mode) {
                 PlaybackMode.SINGLE ->
-                    ExoPlayerEngineFactory.create(app, viewModelScope, PlayerChannel.BOTH)
+                    ExoPlayerEngineFactory.create(app, viewModelScope, PlayerChannel.BOTH, policy)
                 PlaybackMode.SPLIT ->
                     DualPlayerEngine(
-                        audio = ExoPlayerEngineFactory.create(app, viewModelScope, PlayerChannel.AUDIO_ONLY),
-                        video = ExoPlayerEngineFactory.create(app, viewModelScope, PlayerChannel.VIDEO_ONLY),
+                        audio = ExoPlayerEngineFactory.create(app, viewModelScope, PlayerChannel.AUDIO_ONLY, policy),
+                        video = ExoPlayerEngineFactory.create(app, viewModelScope, PlayerChannel.VIDEO_ONLY, policy),
                         scope = viewModelScope,
                     )
             }
@@ -439,6 +450,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun setPlaybackMode(mode: PlaybackMode) {
         if (_playbackMode.value == mode) return
+        rebuildEngine(newMode = mode, newPolicy = _decoderPolicy.value)
+        viewModelScope.launch { enginePrefs.setPlaybackMode(mode.name) }
+    }
+
+    /** 切换解码策略。当前 :native 还没接入,FORCE_SW 行为等同 AUTO(见 SinglePlayerEngine 注释)。 */
+    fun setDecoderPolicy(policy: DecoderPolicy) {
+        if (_decoderPolicy.value == policy) return
+        rebuildEngine(newMode = _playbackMode.value, newPolicy = policy)
+        viewModelScope.launch { enginePrefs.setDecoderPolicy(policy.name) }
+    }
+
+    /** 引擎重建公共路径:抓 (uri, position, speed) 快照 → release → 新 engine → 续播。 */
+    private fun rebuildEngine(newMode: PlaybackMode, newPolicy: DecoderPolicy) {
         val app = getApplication<Application>()
         val current = _engine.value
         val snap = current.state.value
@@ -449,9 +473,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // 释放本地 / 外屏 Surface 引用,避免新 engine 起来前还有旧 engine 在 blit。
         current.setVideoSurface(null)
         current.release()
-        val next = createEngine(app, mode)
+        val next = createEngine(app, newMode, newPolicy)
         _engine.value = next
-        _playbackMode.value = mode
+        _playbackMode.value = newMode
+        _decoderPolicy.value = newPolicy
         // 重新 apply 一次音频路由 —— 新 engine 默认走系统路由。
         next.setPreferredAudioDevice(_selectedAudioOutput.value?.info)
         if (savedUri != null) {
@@ -459,7 +484,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             next.setPlaybackSpeed(savedSpeed)
             if (!wasPlaying) next.pause()
         }
-        viewModelScope.launch { enginePrefs.setPlaybackMode(mode.name) }
         // 注意:Surface 重绑由 PlayerScreen 的 LaunchedEffect(sink) 触发(sink 没变,
         // 但 engine 变了)。这里直接通过 bindLocalSurface 的 sink 守卫顺手处理:
         // - sink == Local → 等 PlayerScreen 的 LaunchedEffect(engineFlow) 重绑

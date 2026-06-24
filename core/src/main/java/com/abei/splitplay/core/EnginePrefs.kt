@@ -35,6 +35,12 @@ class EnginePrefs(context: Context) {
     val playbackMode: Flow<String?> = ds.data.map { it[PLAYBACK_MODE_KEY] }
 
     /**
+     * 解码策略:`"AUTO"` / `"FORCE_HW"` / `"FORCE_SW"`(对应 :media 的 DecoderPolicy)。
+     * 跟 [playbackMode] 一样故意做成字符串,:core 不感知 :media 类型。
+     */
+    val decoderPolicy: Flow<String?> = ds.data.map { it[DECODER_POLICY_KEY] }
+
+    /**
      * 读出的 id 若为 [NO_DEVICE_SENTINEL] 或缺失,统一映射为 `null`(系统默认)。
      */
     val audioDeviceId: Flow<Int?> = ds.data.map { prefs ->
@@ -69,12 +75,17 @@ class EnginePrefs(context: Context) {
         ds.edit { it[PLAYBACK_MODE_KEY] = mode }
     }
 
+    suspend fun setDecoderPolicy(policy: String) {
+        ds.edit { it[DECODER_POLICY_KEY] = policy }
+    }
+
     private companion object {
         val ENGINE_TYPE_KEY = stringPreferencesKey("engine_type")
         val SERVER_BASE_URL_KEY = stringPreferencesKey("server_base_url")
         val AUDIO_DEVICE_ID_KEY = intPreferencesKey("audio_device_id")
         val DISPLAY_ID_KEY = intPreferencesKey("display_id")
         val PLAYBACK_MODE_KEY = stringPreferencesKey("playback_mode")
+        val DECODER_POLICY_KEY = stringPreferencesKey("decoder_policy")
 
         /** `-1` 一直被各 OEM 当作"未指定/无效"使用,这里也用它当 null 哨兵。 */
         const val NO_DEVICE_SENTINEL = -1

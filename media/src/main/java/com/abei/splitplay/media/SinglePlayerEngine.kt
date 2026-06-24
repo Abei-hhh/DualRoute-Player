@@ -40,6 +40,7 @@ class SinglePlayerEngine(
     context: Context,
     scope: CoroutineScope,
     private val channel: PlayerChannel = PlayerChannel.BOTH,
+    private val decoderPolicy: DecoderPolicy = DecoderPolicy.AUTO,
 ) : PlayerEngine {
 
     // 走带缓存的 MediaSource.Factory:本地 URI 直读不入缓存,http(s) 会走 CacheDataSource
@@ -54,6 +55,13 @@ class SinglePlayerEngine(
                     setRenderersFactory(VideoOnlyRenderersFactory(context.applicationContext))
                 PlayerChannel.BOTH -> Unit
             }
+            // DecoderPolicy 接入位:
+            //  AUTO     —— 默认 RenderersFactory 已经硬解优先,什么都不动
+            //  FORCE_HW —— 当前等同 AUTO(默认 factory 没有装额外软解 extension);
+            //              :native 接入 FFmpeg 后才需要这里"只硬不软"过滤
+            //  FORCE_SW —— TODO M5b :native 上线后:把 RenderersFactory 换成 FfmpegRenderersFactory,
+            //              video 端用 FfmpegVideoRenderer,audio 端用 FfmpegAudioRenderer。
+            //              当前先吞下参数,行为等同 AUTO,UI 给的提示已经说"软解未启用"。
         }
         .build()
         .also { player ->

@@ -56,6 +56,7 @@ import com.abei.splitplay.core.EnginePrefs
 import com.abei.splitplay.media.AudioOutput
 import com.abei.splitplay.media.CodecCapability
 import com.abei.splitplay.media.CodecType
+import com.abei.splitplay.media.DecoderPolicy
 import com.abei.splitplay.media.DisplayInfo
 import com.abei.splitplay.media.PlayerEngineRegistry
 import com.abei.splitplay.media.PlayerEngineType
@@ -393,6 +394,80 @@ private fun AudioOutputRow(
 }
 
 /**
+ * 解码策略 radio。切换会重建 engine 实例(自动续播),AUTO 是默认,FORCE_SW 在 :native
+ * 模块上线前等价于 AUTO(行为不变,UI 提示已说明)。
+ */
+@Composable
+internal fun DecoderPolicySection(
+    policy: DecoderPolicy,
+    onSelect: (DecoderPolicy) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("解码策略", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "AUTO:硬解优先,失败时 Media3 自动 fallback;FORCE_HW:只硬解,失败直接报错便于排查;FORCE_SW:优先 FFmpeg 软解。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.size(4.dp))
+            DecoderPolicyRow(
+                title = "AUTO — 自动",
+                subtitle = "硬解优先;失败 fallback(推荐)",
+                selected = policy == DecoderPolicy.AUTO,
+                onClick = { onSelect(DecoderPolicy.AUTO) },
+            )
+            DecoderPolicyRow(
+                title = "FORCE_HW — 强制硬解",
+                subtitle = "硬解失败直接报错。排查格式兼容时用。",
+                selected = policy == DecoderPolicy.FORCE_HW,
+                onClick = { onSelect(DecoderPolicy.FORCE_HW) },
+            )
+            DecoderPolicyRow(
+                title = "FORCE_SW — 强制软解",
+                subtitle = "优先 FFmpeg 软解;:native 模块未接入前等同 AUTO。",
+                selected = policy == DecoderPolicy.FORCE_SW,
+                onClick = { onSelect(DecoderPolicy.FORCE_SW) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun DecoderPolicyRow(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Box(modifier = Modifier.padding(start = 8.dp)) {
+            Column {
+                Text(title, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
  * 播放模式 radio:SINGLE / SPLIT。切到 SPLIT 后引擎会被重建为
  * [com.abei.splitplay.media.DualPlayerEngine](一个 audio-only 引擎 + 一个 video-only 引擎),
  * 详情页 UI 同时挂出两条独立控制条。当前播放会以快照的 (uri, position, speed) 续上。
@@ -714,6 +789,12 @@ fun SettingsDialog(
                     PlaybackModeSection(
                         mode = mode,
                         onSelect = viewModel::setPlaybackMode,
+                    )
+
+                    val policy by viewModel.decoderPolicy.collectAsStateWithLifecycle()
+                    DecoderPolicySection(
+                        policy = policy,
+                        onSelect = viewModel::setDecoderPolicy,
                     )
 
                     val outputs by viewModel.audioOutputs.collectAsStateWithLifecycle()

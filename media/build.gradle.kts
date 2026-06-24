@@ -22,6 +22,7 @@ android {
 
 dependencies {
     implementation(project(":core"))
+    implementation(project(":native"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)

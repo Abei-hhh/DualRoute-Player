@@ -39,6 +39,12 @@ interface PlayerEngineFactory {
     fun create(context: Context, scope: CoroutineScope): PlayerEngine
     fun create(context: Context, scope: CoroutineScope, channel: PlayerChannel): PlayerEngine =
         create(context, scope)
+    fun create(
+        context: Context,
+        scope: CoroutineScope,
+        channel: PlayerChannel,
+        policy: DecoderPolicy,
+    ): PlayerEngine = create(context, scope, channel)
 }
 
 object ExoPlayerEngineFactory : PlayerEngineFactory {
@@ -51,6 +57,13 @@ object ExoPlayerEngineFactory : PlayerEngineFactory {
         scope: CoroutineScope,
         channel: PlayerChannel,
     ): PlayerEngine = SinglePlayerEngine(context, scope, channel)
+
+    override fun create(
+        context: Context,
+        scope: CoroutineScope,
+        channel: PlayerChannel,
+        policy: DecoderPolicy,
+    ): PlayerEngine = SinglePlayerEngine(context, scope, channel, policy)
 }
 
 object IjkPlayerEngineFactory : PlayerEngineFactory {
