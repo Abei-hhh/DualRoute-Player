@@ -8,6 +8,7 @@ import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.opengl.Matrix
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -16,9 +17,13 @@ import android.view.Surface
 import androidx.camera.core.SurfaceOutput
 import androidx.camera.core.SurfaceProcessor
 import androidx.camera.core.SurfaceRequest
+import com.abei.splitplay.feature.camera.ar.GeometryKind
+import com.abei.splitplay.feature.camera.ar.GeometryState
+import com.abei.splitplay.feature.camera.ar.renderableOf
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.nio.ShortBuffer
 import java.util.concurrent.Executor
 
 /**
@@ -45,6 +50,14 @@ class BeautySurfaceProcessor : SurfaceProcessor {
     @Volatile private var smooth: Float = 0f
     @Volatile private var whiten: Float = 0f
 
+    /**
+     * AR 几何体当前状态。GL 第二 pass 读取它在美颜 quad 之后画到每个输出 surface。
+     * `renderGeometryEnabled = false` 时整个第二 pass 跳过(HUD 模式下走 Compose 叠加,
+     * 不走 GL,这样录像里不会出现)。
+     */
+    @Volatile private var geometryState: GeometryState = GeometryState()
+    @Volatile private var renderGeometryEnabled: Boolean = false
+
     // EGL —— 都只在 GL 线程访问
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -60,6 +73,20 @@ class BeautySurfaceProcessor : SurfaceProcessor {
     private var locSmooth = 0
     private var locWhiten = 0
     private var locTexel = 0
+
+    // 第二 pass:3D mesh program(MVP + 纯色)
+    private var meshProgramId = 0
+    private var meshLocPosition = 0
+    private var meshLocMvp = 0
+    private var meshLocColor = 0
+
+    private val meshBuffers = HashMap<GeometryKind, MeshGl>()
+
+    private val modelMat = FloatArray(16)
+    private val viewMat = FloatArray(16)
+    private val projMat = FloatArray(16)
+    private val mvMat = FloatArray(16)
+    private val mvpMat = FloatArray(16)
 
     private var oesTexture = 0
     private var inputSurfaceTexture: SurfaceTexture? = null
@@ -87,6 +114,20 @@ class BeautySurfaceProcessor : SurfaceProcessor {
     fun updateParams(params: BeautyParams) {
         smooth = params.smooth.coerceIn(0f, 1f)
         whiten = params.whiten.coerceIn(0f, 1f)
+    }
+
+    /** UI 线程调:更新 AR 几何体状态(下一帧 GL 第二 pass 读)。 */
+    fun updateGeometryState(state: GeometryState) {
+        geometryState = state
+    }
+
+    /**
+     * 切换 AR 几何体是否走 GL 第二 pass(即是否进录像)。
+     * HUD 模式 → false(走 Compose Canvas 叠加,录像里不出现)。
+     * 入录像模式 → true(GL pass 画到 Preview 与 VideoCapture 共享流上)。
+     */
+    fun setRenderGeometryEnabled(enabled: Boolean) {
+        renderGeometryEnabled = enabled
     }
 
     fun release() {
@@ -174,12 +215,90 @@ class BeautySurfaceProcessor : SurfaceProcessor {
 
             GLES20.glViewport(0, 0, ctx.size.width, ctx.size.height)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            // 同时清 depth(第二 pass 要用)。即使本帧不画 mesh 也清,避免之前帧残留。
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
 
+            // 美颜 quad 不要 depth test —— 它就是背景,要无条件覆盖整个 viewport
+            GLES20.glDisable(GLES20.GL_DEPTH_TEST)
             output.updateTransformMatrix(combinedMatrix, texMatrix)
             drawQuad(combinedMatrix)
+
+            // 第二 pass:3D 几何体(可选)
+            drawMesh(ctx.size.width, ctx.size.height)
+
             EGL14.eglSwapBuffers(eglDisplay, ctx.eglSurface)
         }
+    }
+
+    private fun drawMesh(viewW: Int, viewH: Int) {
+        if (!renderGeometryEnabled) return
+        val g = geometryState
+        if (!g.visible) return
+        val mesh = meshBuffers[g.kind] ?: return
+        if (meshProgramId == 0 || viewW <= 0 || viewH <= 0) return
+
+        // 透视投影:60° 垂直视场,3 单位远的相机,看 [-1,1] 的几何体正好不爆框。
+        val aspect = viewW.toFloat() / viewH.toFloat()
+        Matrix.perspectiveM(projMat, 0, 60f, aspect, 0.1f, 100f)
+        Matrix.setLookAtM(viewMat, 0, 0f, 0f, 3f, 0f, 0f, 0f, 0f, 1f, 0f)
+
+        // 把 GeometryState.positionNorm (Compose 屏幕坐标:X 右、Y 下,[-1,1])
+        // 映射到世界坐标:Z=0 平面上,适配视锥宽高
+        val halfH = 3f * TAN_30
+        val halfW = aspect * halfH
+        val worldX = g.positionNorm.x * halfW
+        val worldY = -g.positionNorm.y * halfH    // GL Y 朝上,翻转
+        val s = halfH * g.scale.coerceAtLeast(1e-3f)
+
+        Matrix.setIdentityM(modelMat, 0)
+        Matrix.translateM(modelMat, 0, worldX, worldY, 0f)
+        // roll 在最外层(world Z 轴,屏幕平面)—— 由捏合角度驱动。
+        // 因为输出 framebuffer 的 Y 向上而手势空间 Y 向下,roll 取负让屏幕上的旋转方向与手势一致。
+        Matrix.rotateM(modelMat, 0, -g.rotationDegRoll, 0f, 0f, 1f)
+        Matrix.rotateM(modelMat, 0, g.rotationDegYaw, 0f, 1f, 0f)
+        Matrix.rotateM(modelMat, 0, g.rotationDegPitch, 1f, 0f, 0f)
+        Matrix.scaleM(modelMat, 0, s, s, s)
+
+        Matrix.multiplyMM(mvMat, 0, viewMat, 0, modelMat, 0)
+        Matrix.multiplyMM(mvpMat, 0, projMat, 0, mvMat, 0)
+
+        // 解包 ARGB → RGBA float
+        val color = g.colorArgb
+        val a = ((color ushr 24) and 0xFF) / 255f
+        val r = ((color ushr 16) and 0xFF) / 255f
+        val gC = ((color ushr 8) and 0xFF) / 255f
+        val b = (color and 0xFF) / 255f
+
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+        GLES20.glDepthFunc(GLES20.GL_LEQUAL)
+
+        GLES20.glUseProgram(meshProgramId)
+        GLES20.glUniformMatrix4fv(meshLocMvp, 1, false, mvpMat, 0)
+
+        mesh.vertices.position(0)
+        GLES20.glEnableVertexAttribArray(meshLocPosition)
+        GLES20.glVertexAttribPointer(meshLocPosition, 3, GLES20.GL_FLOAT, false, 0, mesh.vertices)
+
+        // 1) 先画半透明实心面(开 blend),让人感知体积
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        GLES20.glUniform4f(meshLocColor, r, gC, b, a * 0.20f)
+        mesh.triangles.position(0)
+        GLES20.glDrawElements(
+            GLES20.GL_TRIANGLES, mesh.triangleCount, GLES20.GL_UNSIGNED_SHORT, mesh.triangles,
+        )
+        GLES20.glDisable(GLES20.GL_BLEND)
+
+        // 2) 再画线框(实色),压在面上;GLES2 的 glLineWidth 多数驱动只支持 1.0,这里仍然请求
+        GLES20.glLineWidth(4f)
+        GLES20.glUniform4f(meshLocColor, r, gC, b, a)
+        mesh.lines.position(0)
+        GLES20.glDrawElements(
+            GLES20.GL_LINES, mesh.lineCount, GLES20.GL_UNSIGNED_SHORT, mesh.lines,
+        )
+
+        GLES20.glDisableVertexAttribArray(meshLocPosition)
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
     }
 
     private fun drawQuad(matrix: FloatArray) {
@@ -226,6 +345,9 @@ class BeautySurfaceProcessor : SurfaceProcessor {
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8,
+            // 16-bit depth:给 3D 第二 pass 做深度测试用。注意所有 window/pbuffer surface
+            // 都会分配 depth buffer,稍微多吃一点内存,但 1080p × 16bit ≈ 4MB,可接受。
+            EGL14.EGL_DEPTH_SIZE, 16,
             EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
             EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
             EGL14.EGL_NONE,
@@ -249,6 +371,8 @@ class BeautySurfaceProcessor : SurfaceProcessor {
 
         EGL14.eglMakeCurrent(eglDisplay, pbufferSurface, pbufferSurface, eglContext)
         compileProgram()
+        compileMeshProgram()
+        prepareMeshBuffers()
     }
 
     private fun compileProgram() {
@@ -274,6 +398,45 @@ class BeautySurfaceProcessor : SurfaceProcessor {
         locSmooth = GLES20.glGetUniformLocation(programId, "uSmooth")
         locWhiten = GLES20.glGetUniformLocation(programId, "uWhiten")
         locTexel = GLES20.glGetUniformLocation(programId, "uTexel")
+    }
+
+    private fun compileMeshProgram() {
+        val vs = compileShader(GLES20.GL_VERTEX_SHADER, MESH_VERTEX_SHADER)
+        val fs = compileShader(GLES20.GL_FRAGMENT_SHADER, MESH_FRAGMENT_SHADER)
+        meshProgramId = GLES20.glCreateProgram()
+        GLES20.glAttachShader(meshProgramId, vs)
+        GLES20.glAttachShader(meshProgramId, fs)
+        GLES20.glLinkProgram(meshProgramId)
+        val status = IntArray(1)
+        GLES20.glGetProgramiv(meshProgramId, GLES20.GL_LINK_STATUS, status, 0)
+        if (status[0] == 0) {
+            val log = GLES20.glGetProgramInfoLog(meshProgramId)
+            GLES20.glDeleteProgram(meshProgramId)
+            meshProgramId = 0
+            throw RuntimeException("Mesh program link failed: $log")
+        }
+        GLES20.glDeleteShader(vs)
+        GLES20.glDeleteShader(fs)
+        meshLocPosition = GLES20.glGetAttribLocation(meshProgramId, "aPos")
+        meshLocMvp = GLES20.glGetUniformLocation(meshProgramId, "uMvp")
+        meshLocColor = GLES20.glGetUniformLocation(meshProgramId, "uColor")
+    }
+
+    private fun prepareMeshBuffers() {
+        for (kind in GeometryKind.entries) {
+            val r = renderableOf(kind)
+            val vb = ByteBuffer.allocateDirect(r.vertices.size * 4)
+                .order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(r.vertices); position(0) }
+            val lb = ByteBuffer.allocateDirect(r.lineIndices.size * 2)
+                .order(ByteOrder.nativeOrder()).asShortBuffer().apply { put(r.lineIndices); position(0) }
+            val tb = ByteBuffer.allocateDirect(r.triangleIndices.size * 2)
+                .order(ByteOrder.nativeOrder()).asShortBuffer().apply { put(r.triangleIndices); position(0) }
+            meshBuffers[kind] = MeshGl(
+                vertices = vb,
+                lines = lb, lineCount = r.lineIndices.size,
+                triangles = tb, triangleCount = r.triangleIndices.size,
+            )
+        }
     }
 
     private fun compileShader(type: Int, src: String): Int {
@@ -338,6 +501,11 @@ class BeautySurfaceProcessor : SurfaceProcessor {
             GLES20.glDeleteProgram(programId)
             programId = 0
         }
+        if (meshProgramId != 0) {
+            GLES20.glDeleteProgram(meshProgramId)
+            meshProgramId = 0
+        }
+        meshBuffers.clear()
         releaseInput()
         if (pbufferSurface != EGL14.EGL_NO_SURFACE) {
             EGL14.eglDestroySurface(eglDisplay, pbufferSurface)
@@ -358,8 +526,18 @@ class BeautySurfaceProcessor : SurfaceProcessor {
         val size: Size,
     )
 
+    /** 一个几何体在 GL 端的客户端 buffer(走 client-side array,不用 VBO,GLES2 友好)。 */
+    private data class MeshGl(
+        val vertices: FloatBuffer,
+        val lines: ShortBuffer,
+        val lineCount: Int,
+        val triangles: ShortBuffer,
+        val triangleCount: Int,
+    )
+
     companion object {
         private const val TAG = "BeautyProcessor"
+        private const val TAN_30: Float = 0.57735026f  // tan(30°)
 
         private val QUAD_VERTICES = floatArrayOf(
             -1f, -1f,
@@ -451,6 +629,22 @@ class BeautySurfaceProcessor : SurfaceProcessor {
                 vec3 whitened = mix(smoothed, vec3(1.0), uWhiten * skin * lightZone * 0.35);
 
                 gl_FragColor = vec4(whitened, c.a);
+            }
+        """
+
+        // 第二 pass:3D mesh,纯色 + MVP。
+        private const val MESH_VERTEX_SHADER = """
+            attribute vec3 aPos;
+            uniform mat4 uMvp;
+            void main() {
+                gl_Position = uMvp * vec4(aPos, 1.0);
+            }
+        """
+        private const val MESH_FRAGMENT_SHADER = """
+            precision mediump float;
+            uniform vec4 uColor;
+            void main() {
+                gl_FragColor = uColor;
             }
         """
     }

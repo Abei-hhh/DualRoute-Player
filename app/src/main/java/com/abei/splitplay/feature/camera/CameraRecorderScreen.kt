@@ -13,6 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.ResolutionSelector
@@ -48,6 +49,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.collectAsState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cameraswitch
@@ -78,11 +80,17 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.abei.splitplay.feature.camera.ar.GeometryOverlay
+import com.abei.splitplay.feature.camera.ar.HandLandmarkerAnalyzer
+import com.abei.splitplay.feature.camera.ar.HandSkeletonOverlay
+import com.abei.splitplay.feature.camera.ar.RenderMode
 import com.abei.splitplay.feature.camera.beauty.BeautyEffect
 import com.abei.splitplay.feature.camera.beauty.BeautyParams
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.delay
 import java.util.Locale
+import java.util.concurrent.Executors
 import androidx.camera.core.Preview as CameraPreview
 
 /** 录制按钮的交互模式。 */
@@ -195,6 +203,13 @@ private fun CameraContent(lifecycleOwner: LifecycleOwner, onBack: () -> Unit) {
     // 录制按钮交互模式:TAP = 点开始/再点停止;HOLD = 按住录、松手停
     var recordMode by remember { mutableStateOf(RecordMode.TAP) }
 
+    // AR ViewModel —— 收敛手势/几何体状态,Compose 与 GL 共用
+    val arViewModel: CameraRecorderViewModel = viewModel()
+    val geometryState by arViewModel.geometryState.collectAsState()
+    val renderMode by arViewModel.renderMode.collectAsState()
+    val handFrame by arViewModel.handFrame.collectAsState()
+    val showSkeleton by arViewModel.showSkeleton.collectAsState()
+
     // BeautyEffect 整屏只创建一次,跨 rebind 复用,onDispose 释放 EGL
     val beautyEffect = remember { BeautyEffect(mainExecutor) }
     DisposableEffect(beautyEffect) {
@@ -203,10 +218,39 @@ private fun CameraContent(lifecycleOwner: LifecycleOwner, onBack: () -> Unit) {
     LaunchedEffect(beautyParams) {
         beautyEffect.updateParams(beautyParams)
     }
+    // 推几何体状态到 GL 第二 pass(无论模式都推,GL pass 由 renderGeometryEnabled 决定是否真画)
+    LaunchedEffect(geometryState) {
+        beautyEffect.updateGeometryState(geometryState)
+    }
+    LaunchedEffect(renderMode) {
+        beautyEffect.setRenderGeometryEnabled(renderMode == RenderMode.IN_RECORDING)
+    }
+
+    // 用 ref 让 analyzer 总能读到最新的前/后摄状态(避免 capture 旧值)
+    val frontCameraRef = remember { object { var value: Boolean = false } }
+    frontCameraRef.value = useFrontCamera
+
+    // MediaPipe 分析器整屏只创建一次,close() 在 onDispose 里调
+    val handExecutor = remember { Executors.newSingleThreadExecutor() }
+    val handAnalyzer = remember {
+        HandLandmarkerAnalyzer(
+            context = context.applicationContext,
+            onResult = { frame -> arViewModel.onHandFrame(frame) },
+            isFrontCamera = { frontCameraRef.value },
+        )
+    }
+    DisposableEffect(handAnalyzer) {
+        onDispose {
+            handAnalyzer.close()
+            handExecutor.shutdown()
+        }
+    }
 
     LaunchedEffect(useFrontCamera) {
         val provider = ProcessCameraProvider.getInstance(context).awaitFuture()
         provider.unbindAll()
+        // 翻转摄像头时清除残留几何体状态,避免坐标错位
+        arViewModel.resetGesture()
 
         val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA
             else CameraSelector.DEFAULT_BACK_CAMERA
@@ -251,6 +295,25 @@ private fun CameraContent(lifecycleOwner: LifecycleOwner, onBack: () -> Unit) {
             .apply { if (videoStabSupported) setVideoStabilizationEnabled(true) }
             .build()
 
+        // ImageAnalysis —— 独立的一路给 MediaPipe HandLandmarker 喂帧。
+        // KEEP_ONLY_LATEST 保证 MediaPipe 慢时不堆积;RGBA_8888 让 toBitmap() 直接可用。
+        // 分辨率走 720p,够手势识别且省电;ViewPort 会把它一起裁到 9:16,坐标天然对齐预览。
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            Size(720, 1280),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                        ),
+                    )
+                    .build(),
+            )
+            .build()
+            .apply { setAnalyzer(handExecutor, handAnalyzer) }
+
         val viewPort = ViewPort.Builder(
             Rational(9, 16),
             previewView.display?.rotation ?: android.view.Surface.ROTATION_0,
@@ -259,6 +322,7 @@ private fun CameraContent(lifecycleOwner: LifecycleOwner, onBack: () -> Unit) {
         val group = UseCaseGroup.Builder()
             .addUseCase(preview)
             .addUseCase(capture)
+            .addUseCase(imageAnalysis)
             .addEffect(beautyEffect)
             .setViewPort(viewPort)
             .build()
@@ -312,6 +376,23 @@ private fun CameraContent(lifecycleOwner: LifecycleOwner, onBack: () -> Unit) {
             factory = { previewView },
         )
 
+        // HUD 模式:在屏上画线框几何体(不进录像)。
+        // 入录像模式时这一层留空,几何体由 GL 第二 pass 画进 PreviewView 与 VideoCapture 共享流。
+        if (renderMode == RenderMode.HUD_OVERLAY) {
+            GeometryOverlay(
+                state = geometryState,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        // 调试用骨架叠加 —— 不进录像,可在 UI 上切换显隐
+        if (showSkeleton) {
+            HandSkeletonOverlay(
+                frame = handFrame,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
         // 对焦指示框 —— 800ms 自动隐藏
         focusIndicator?.let { off ->
             Box(
@@ -347,6 +428,19 @@ private fun CameraContent(lifecycleOwner: LifecycleOwner, onBack: () -> Unit) {
                 mode = recordMode,
                 enabled = recording == null,
                 onChange = { recordMode = it },
+            )
+            Spacer(Modifier.height(8.dp))
+            // AR 渲染模式:HUD 屏上 / 入录像。录制中禁用切换,避免视频突然多/少一个物体。
+            RenderModeToggle(
+                mode = renderMode,
+                enabled = recording == null,
+                onChange = { arViewModel.setRenderMode(it) },
+            )
+            Spacer(Modifier.height(8.dp))
+            // 骨架调试开关
+            SkeletonToggle(
+                shown = showSkeleton,
+                onChange = { arViewModel.setShowSkeleton(it) },
             )
             Spacer(Modifier.height(8.dp))
             Row(
@@ -483,6 +577,47 @@ private fun RecordModeToggle(
         ModeChip(label = "长按", selected = mode == RecordMode.HOLD, enabled = enabled) {
             onChange(RecordMode.HOLD)
         }
+    }
+}
+
+/** 骨架显隐开关。始终可点(录制中也允许 —— 不影响录像内容)。 */
+@Composable
+private fun SkeletonToggle(
+    shown: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+            .padding(3.dp),
+    ) {
+        ModeChip(label = "骨架开", selected = shown, enabled = true) { onChange(true) }
+        ModeChip(label = "骨架关", selected = !shown, enabled = true) { onChange(false) }
+    }
+}
+
+/** AR 几何体渲染模式 pill:HUD = 只屏上;入录像 = 走 GL 第二 pass。 */
+@Composable
+private fun RenderModeToggle(
+    mode: RenderMode,
+    enabled: Boolean,
+    onChange: (RenderMode) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+            .padding(3.dp),
+    ) {
+        ModeChip(
+            label = "HUD",
+            selected = mode == RenderMode.HUD_OVERLAY,
+            enabled = enabled,
+        ) { onChange(RenderMode.HUD_OVERLAY) }
+        ModeChip(
+            label = "入录像",
+            selected = mode == RenderMode.IN_RECORDING,
+            enabled = enabled,
+        ) { onChange(RenderMode.IN_RECORDING) }
     }
 }
 

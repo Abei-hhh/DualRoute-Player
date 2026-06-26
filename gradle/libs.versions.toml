@@ -41,6 +41,12 @@ ijkplayer = "0.8.8"
 # CameraX —— 录制功能用
 cameraX = "1.4.1"
 
+# MediaPipe Tasks Vision —— 手势识别(HandLandmarker / GestureRecognizer)
+# 模型文件 hand_landmarker.task / gesture_recognizer.task 需手动放到 app/src/main/assets/,
+# 否则分析器会 no-op 并打 warn(分析帧仍会消费,UI 不会崩)。
+# 从 https://developers.google.com/mediapipe/solutions/vision/gesture_recognizer 下载。
+mediapipeTasksVision = "0.10.21"
+
 [libraries]
 # Core AndroidX
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -101,6 +107,9 @@ androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", 
 androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraX" }
 androidx-camera-video = { group = "androidx.camera", name = "camera-video", version.ref = "cameraX" }
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraX" }
+
+# MediaPipe Tasks Vision —— 手势识别(GestureRecognizer 内部包含 HandLandmarker)
+mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediapipeTasksVision" }
 
 # Testing
 junit = { group = "junit", name = "junit", version.ref = "junit" }

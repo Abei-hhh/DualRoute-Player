@@ -38,6 +38,11 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // MediaPipe .task 模型文件已是压缩格式,再走 aapt 压缩会导致运行时 mmap 失败。
+    androidResources {
+        noCompress.add("task")
+    }
 }
 
 dependencies {
@@ -77,6 +82,9 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.view)
+
+    // MediaPipe Tasks Vision —— 手势识别(摄像头页 AR 叠加用)
+    implementation(libs.mediapipe.tasks.vision)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 
